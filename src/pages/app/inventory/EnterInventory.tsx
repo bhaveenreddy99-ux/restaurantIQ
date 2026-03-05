@@ -16,6 +16,7 @@ import {
   AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetFooter } from "@/components/ui/sheet";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -23,10 +24,10 @@ import {
   BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb";
 import { toast } from "sonner";
 import {
-  Plus, Send, Package, BookOpen, Play, ArrowLeft, Eye, CheckCircle,
+  Plus, Minus, Send, Package, BookOpen, Play, ArrowLeft, Eye, CheckCircle,
   XCircle, ShoppingCart, Copy, Clock, ClipboardCheck, Trash2, ChevronRight, Eraser,
-  Search, SkipForward, EyeOff, Check, ListOrdered, AlertTriangle, MoreHorizontal,
-  LayoutGrid, List as ListIcon, TrendingDown, CalendarClock, MapPin, Filter } from "lucide-react";
+  Search, SkipForward, EyeOff, Check, ListOrdered, AlertTriangle, MoreHorizontal, MoreVertical,
+  LayoutGrid, List as ListIcon, TrendingDown, CalendarClock, MapPin, Filter, Pencil } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { useIsCompact, useIsMobile } from "@/hooks/use-mobile";
 import { useCategoryMapping } from "@/hooks/useCategoryMapping";
@@ -140,7 +141,7 @@ export default function EnterInventoryPage() {
   const [savedId, setSavedId] = useState<string | null>(null);
   const [submitConfirmOpen, setSubmitConfirmOpen] = useState(false);
   const [categoryMode, setCategoryMode] = useState<string>("list_order");
-  const [viewToggle, setViewToggle] = useState<"table" | "compact">("table");
+  const [viewToggle] = useState<"table" | "compact">("table");
   const [statusFilter, setStatusFilter] = useState<"all" | "uncounted" | "low" | "critical">("all");
   const [lastEditedId, setLastEditedId] = useState<string | null>(null);
   const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
@@ -151,6 +152,12 @@ export default function EnterInventoryPage() {
 
   // Approved PAR data for read-only display during count entry
   const [approvedParMap, setApprovedParMap] = useState<Record<string, number>>({});
+
+  // ── Edit PAR/Price sheet (three-dot menu)
+  const [editQuickItem, setEditQuickItem] = useState<any>(null);
+  const [editQuickPar, setEditQuickPar] = useState<string>("");
+  const [editQuickPrice, setEditQuickPrice] = useState<string>("");
+  const [editQuickSaving, setEditQuickSaving] = useState(false);
 
   // Load approved PAR values when session opens
   useEffect(() => {
@@ -271,6 +278,26 @@ export default function EnterInventoryPage() {
     supabase.from("par_guide_items").select("*").eq("par_guide_id", selectedPar).then(({ data }) => { if (data) setParItems(data); });
   }, [selectedPar]);
 
+  // Restore active session from sessionStorage after a hard refresh
+  useEffect(() => {
+    const savedId = sessionStorage.getItem('inv_active_session');
+    if (!savedId || activeSession) return;
+    const all = [...inProgressSessions, ...reviewSessions];
+    const found = all.find(s => s.id === savedId);
+    if (found) openEditor(found);
+  }, [inProgressSessions, reviewSessions]);
+
+  // Warn user before leaving page while a session is open
+  useEffect(() => {
+    if (!activeSession) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [activeSession]);
+
   const handleCreateSession = async () => {
     if (!currentRestaurant || !user || !selectedList || !sessionName) return;
     const { data, error } = await supabase.from("inventory_sessions").insert({
@@ -338,6 +365,7 @@ export default function EnterInventoryPage() {
   };
 
   const openEditor = async (session: any) => {
+    sessionStorage.setItem('inv_active_session', session.id);
     setActiveSession(session);
     const [{ data }, listResult, catalogResult] = await Promise.all([
       supabase.from("inventory_session_items").select("*").eq("session_id", session.id),
@@ -421,6 +449,22 @@ export default function EnterInventoryPage() {
     }
   }, []);
 
+  const handleUpdatePrice = (id: string, rawValue: string) => {
+    const parsed = parseInputValue(rawValue);
+    setItems(items.map((i) => i.id === id ? { ...i, unit_cost: parsed } : i));
+  };
+
+  const handleSavePrice = useCallback(async (id: string, cost: number | null) => {
+    setSavingId(id);
+    const { error } = await supabase.from("inventory_session_items").update({ unit_cost: cost }).eq("id", id);
+    setSavingId(null);
+    if (error) toast.error("Could not save price");
+    else {
+      setSavedId(id);
+      setTimeout(() => setSavedId(prev => prev === id ? null : prev), 1500);
+    }
+  }, []);
+
   const handleSaveStock = useCallback(async (id: string, stockVal: number | null) => {
     setSavingId(id);
     const { error } = await supabase.from("inventory_session_items").update({ current_stock: stockVal ?? null } as any).eq("id", id);
@@ -437,7 +481,7 @@ export default function EnterInventoryPage() {
     if (!activeSession) return;
     const { error } = await supabase.from("inventory_sessions").update({ status: "IN_REVIEW", updated_at: new Date().toISOString() }).eq("id", activeSession.id);
     if (error) toast.error(error.message);
-    else { toast.success("Submitted for review!"); setActiveSession(null); setItems([]); fetchSessions(); }
+    else { toast.success("Submitted for review!"); sessionStorage.removeItem('inv_active_session'); setActiveSession(null); setItems([]); fetchSessions(); }
   };
 
   const handleDeleteSession = async () => {
@@ -575,40 +619,15 @@ export default function EnterInventoryPage() {
     else { toast.success("Session sent back"); fetchSessions(); }
   };
 
-  const handleView = async (session: any) => {
-    const { data } = await supabase.from("inventory_session_items").select("*").eq("session_id", session.id);
-    
-    if (currentRestaurant) {
-      const { data: guides } = await supabase
-        .from("par_guides")
-        .select("id")
-        .eq("restaurant_id", currentRestaurant.id)
-        .eq("inventory_list_id", session.inventory_list_id);
-      
-      if (guides && guides.length > 0) {
-        const guideIds = guides.map(g => g.id);
-        const { data: parData } = await supabase
-          .from("par_guide_items")
-          .select("item_name, par_level")
-          .in("par_guide_id", guideIds);
-        
-        if (parData) {
-          const parMap: Record<string, number> = {};
-          parData.forEach(p => { parMap[p.item_name] = Number(p.par_level); });
-          
-          const enriched = (data || []).map(item => ({
-            ...item,
-            approved_par: parMap[item.item_name] ?? null,
-          }));
-          setViewItems(enriched);
-          setViewSession(session);
-          return;
-        }
-      }
-    }
-    
-    setViewItems((data || []).map(item => ({ ...item, approved_par: null })));
-    setViewSession(session);
+  const handleView = (session: any) => {
+    if (session.status === "APPROVED") navigate("/app/inventory/approved");
+    else navigate("/app/inventory/review");
+  };
+
+  const handleDeclineToReview = async (sessionId: string) => {
+    const { error } = await supabase.from("inventory_sessions").update({ status: "IN_REVIEW", updated_at: new Date().toISOString() }).eq("id", sessionId);
+    if (error) toast.error(error.message);
+    else { toast.success("Session moved back to Review"); fetchSessions(); }
   };
 
   const handleDuplicate = async (session: any) => {
@@ -741,6 +760,9 @@ export default function EnterInventoryPage() {
   );
 
   const getItemCategory = (item: any): string => {
+    if (categoryMode === "alphabetic") {
+      return item.item_name.charAt(0).toUpperCase();
+    }
     if (hasMappings && itemCategoryMap[item.item_name]) {
       return itemCategoryMap[item.item_name].category_name;
     }
@@ -815,13 +837,13 @@ export default function EnterInventoryPage() {
     });
   }
 
+  if (categoryMode === "alphabetic") {
+    filteredItems.sort((a, b) => a.item_name.localeCompare(b.item_name));
+  }
+
   const categories = hasMappings
     ? mappedCategories.map(c => c.name)
     : [...new Set(items.map((i) => i.category).filter(Boolean))];
-  const allCategories = hasMappings
-    ? categories
-    : [...defaultCategories, ...categories.filter((c) => !defaultCategories.includes(c))];
-
   const selectedListName = lists.find((l) => l.id === selectedList)?.name || "";
 
   const groupedItems = filteredItems.reduce<Record<string, any[]>>((acc, item) => {
@@ -837,7 +859,9 @@ export default function EnterInventoryPage() {
         const sortB = mappedCategories.find(c => c.name === b)?.sort_order ?? 999;
         return sortA - sortB;
       })
-    : Object.keys(groupedItems);
+    : categoryMode === "alphabetic"
+      ? Object.keys(groupedItems).sort()
+      : Object.keys(groupedItems);
 
   const jumpToNextEmpty = () => {
     const emptyItem = filteredItems.find(i => !i.current_stock || Number(i.current_stock) === 0);
@@ -849,7 +873,7 @@ export default function EnterInventoryPage() {
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent, currentIndex: number, field: "stock" | "par" = "stock") => {
+  const handleKeyDown = (e: React.KeyboardEvent, currentIndex: number, field: "stock" | "par" | "price" = "stock") => {
     const getRef = (idx: number, f: string) => inputRefs.current[`${filteredItems[idx]?.id}_${f}`] || inputRefs.current[filteredItems[idx]?.id];
 
     if (e.key === "Enter" || e.key === "ArrowDown") {
@@ -861,12 +885,22 @@ export default function EnterInventoryPage() {
       const prev = getRef(currentIndex - 1, field);
       if (prev) prev.focus();
     } else if (e.key === "Tab") {
-      if (!e.shiftKey && field === "stock") {
-        const parRef = inputRefs.current[`${filteredItems[currentIndex]?.id}_par`];
-        if (parRef) { e.preventDefault(); parRef.focus(); }
-      } else if (e.shiftKey && field === "par") {
-        const stockRef = inputRefs.current[filteredItems[currentIndex]?.id];
-        if (stockRef) { e.preventDefault(); stockRef.focus(); }
+      if (!e.shiftKey) {
+        if (field === "stock") {
+          const parRef = inputRefs.current[`${filteredItems[currentIndex]?.id}_par`];
+          if (parRef) { e.preventDefault(); parRef.focus(); }
+        } else if (field === "par") {
+          const priceRef = inputRefs.current[`${filteredItems[currentIndex]?.id}_price`];
+          if (priceRef) { e.preventDefault(); priceRef.focus(); }
+        }
+      } else {
+        if (field === "par") {
+          const stockRef = inputRefs.current[filteredItems[currentIndex]?.id];
+          if (stockRef) { e.preventDefault(); stockRef.focus(); }
+        } else if (field === "price") {
+          const parRef = inputRefs.current[`${filteredItems[currentIndex]?.id}_par`];
+          if (parRef) { e.preventDefault(); parRef.focus(); }
+        }
       }
     }
   };
@@ -887,7 +921,7 @@ export default function EnterInventoryPage() {
       if (risk.label === "Low") lowCount++;
       if (risk.label === "Critical") criticalCount++;
       if (par && par > 0) {
-        const need = Math.max(0, par - Number(i.current_stock ?? 0));
+        const need = Math.ceil(Math.max(0, par - Number(i.current_stock ?? 0)));
         if (need > 0 && i.unit_cost) estimatedValue += need * Number(i.unit_cost);
       }
     });
@@ -914,7 +948,7 @@ export default function EnterInventoryPage() {
         <div className="sticky top-0 z-20 bg-background/95 backdrop-blur-sm -mx-4 px-4 lg:-mx-0 lg:px-0 border-b border-border/40">
           {/* Row 1: Identity + Location + Submit */}
           <div className="flex items-center gap-3 py-3">
-            <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 rounded-lg" onClick={() => { setActiveSession(null); fetchSessions(); }}>
+            <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 rounded-lg" onClick={() => { sessionStorage.removeItem('inv_active_session'); setActiveSession(null); fetchSessions(); }}>
               <ArrowLeft className="h-4 w-4" />
             </Button>
             <div className="min-w-0 flex-1">
@@ -959,20 +993,19 @@ export default function EnterInventoryPage() {
               />
             </div>
 
-            {/* LEFT: Category pills */}
-            <div className="flex gap-1.5 overflow-x-auto no-scrollbar">
-              <button
-                className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${filterCategory === "all" ? "bg-foreground text-background" : "bg-muted/50 text-muted-foreground hover:bg-muted"}`}
-                onClick={() => setFilterCategory("all")}
-              >All</button>
-              {allCategories.map(c => (
-                <button
-                  key={c}
-                  className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${filterCategory === c ? "bg-foreground text-background" : "bg-muted/50 text-muted-foreground hover:bg-muted"}`}
-                  onClick={() => setFilterCategory(c)}
-                >{c}</button>
-              ))}
-            </div>
+            {/* Category grouping dropdown */}
+            <Select value={categoryMode} onValueChange={(v) => { setCategoryMode(v); setFilterCategory("all"); }}>
+              <SelectTrigger className="h-10 w-[170px] text-xs">
+                <ListOrdered className="h-3.5 w-3.5 mr-1.5 shrink-0" />
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="list_order">List Order</SelectItem>
+                <SelectItem value="custom-categories">AI Categories</SelectItem>
+                <SelectItem value="my-categories">My Categories</SelectItem>
+                <SelectItem value="alphabetic">Alphabetic</SelectItem>
+              </SelectContent>
+            </Select>
 
             {/* CENTER: Progress — desktop */}
             <div className="hidden lg:flex items-center gap-3 mx-auto shrink-0">
@@ -989,20 +1022,8 @@ export default function EnterInventoryPage() {
               <span className="text-xs font-medium tabular-nums text-muted-foreground">{progressPct}%</span>
             </div>
 
-            {/* RIGHT: View toggle + Filters */}
+            {/* RIGHT: Filters + Actions */}
             <div className="hidden lg:flex items-center gap-2 ml-auto shrink-0">
-              {/* View toggle */}
-              <div className="flex items-center border rounded-lg overflow-hidden h-9">
-                <button
-                  className={`px-3 h-full text-xs font-medium transition-all ${viewToggle === "table" ? "bg-foreground text-background" : "bg-background text-muted-foreground hover:bg-muted/50"}`}
-                  onClick={() => setViewToggle("table")}
-                >Standard</button>
-                <button
-                  className={`px-3 h-full text-xs font-medium transition-all ${viewToggle === "compact" ? "bg-foreground text-background" : "bg-background text-muted-foreground hover:bg-muted/50"}`}
-                  onClick={() => setViewToggle("compact")}
-                >Compact</button>
-              </div>
-
               {/* Status filter dropdown */}
               <Select value={statusFilter} onValueChange={(v: any) => setStatusFilter(v)}>
                 <SelectTrigger className="h-9 w-[130px] text-xs">
@@ -1016,11 +1037,6 @@ export default function EnterInventoryPage() {
                   <SelectItem value="critical">Critical</SelectItem>
                 </SelectContent>
               </Select>
-
-              {/* Quick actions */}
-              <Button size="sm" variant="outline" className="h-9 gap-1.5 text-xs" onClick={jumpToNextEmpty}>
-                <SkipForward className="h-3.5 w-3.5" /> Next Empty
-              </Button>
 
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -1044,11 +1060,6 @@ export default function EnterInventoryPage() {
                       <BookOpen className="h-3.5 w-3.5 mr-2" /> Add from catalog
                     </DropdownMenuItem>
                   )}
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={() => { setCategoryMode(categoryMode === "list_order" ? "custom-categories" : categoryMode === "custom-categories" ? "my-categories" : "list_order"); setFilterCategory("all"); }}>
-                    <ListOrdered className="h-3.5 w-3.5 mr-2" />
-                    {categoryMode === "list_order" ? "Switch to AI Categories" : categoryMode === "custom-categories" ? "Switch to My Categories" : "Switch to List Order"}
-                  </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
@@ -1105,12 +1116,19 @@ export default function EnterInventoryPage() {
                       return (
                         <div
                           key={item.id}
-                          className={`rounded-xl border transition-all duration-200 ${
+                          className={`relative rounded-xl border transition-all duration-200 ${
                             rowState === "counted" ? "border-success/20 bg-success/[0.03]" :
                             rowState === "zero" ? "border-border/30 bg-muted/10" :
                             "border-border/40 bg-card"
                           } ${isRecentlyEdited ? "ring-2 ring-primary/20" : ""}`}
                         >
+                          {/* Green checkmark overlay badge when counted */}
+                          {rowState === "counted" && (
+                            <div className="absolute top-3 right-3 z-10 pointer-events-none">
+                              <CheckCircle className="h-4 w-4 text-success opacity-60" />
+                            </div>
+                          )}
+
                           <div className="p-4 space-y-3">
                             {/* Item identity */}
                             <div className="flex items-start justify-between gap-3">
@@ -1126,7 +1144,7 @@ export default function EnterInventoryPage() {
                                   <span className="text-[10px] text-muted-foreground/50">Last: {formatLastOrdered(getLastOrderDate(item.item_name))}</span>
                                 </div>
                               </div>
-                              <Badge className={`${risk.bgClass} ${risk.textClass} border-0 text-[10px] font-medium shrink-0`}>
+                              <Badge className={`${risk.bgClass} ${risk.textClass} border-0 text-[10px] font-medium shrink-0 mr-5`}>
                                 {risk.label}
                               </Badge>
                             </div>
@@ -1135,31 +1153,59 @@ export default function EnterInventoryPage() {
                             <div className="flex items-end gap-4">
                               <div className="flex-1">
                                 <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1.5 block">On Hand</label>
-                                <Input
-                                  ref={el => { inputRefs.current[item.id] = el; }}
-                                  inputMode="decimal"
-                                  type="number"
-                                  min={0}
-                                  step={0.1}
-                                  value={inputDisplayValue(item.current_stock)}
-                                  onFocus={(e) => e.target.select()}
-                                  onChange={(e) => handleUpdateStock(item.id, e.target.value)}
-                                  onBlur={() => handleSaveStock(item.id, item.current_stock)}
-                                  onKeyDown={(e) => handleKeyDown(e, globalIdx, "stock")}
-                                  className="h-14 text-xl font-mono text-center font-semibold rounded-lg border-2 border-border/60 focus:border-primary/50 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                                />
+                                <div className="flex items-center gap-1.5">
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="icon"
+                                    className="h-16 w-12 shrink-0 rounded-lg text-lg"
+                                    onClick={() => {
+                                      const newVal = Math.max(0, Number(item.current_stock ?? 0) - 1);
+                                      handleUpdateStock(item.id, String(newVal));
+                                      handleSaveStock(item.id, newVal);
+                                    }}
+                                  >
+                                    <Minus className="h-4 w-4" />
+                                  </Button>
+                                  <Input
+                                    ref={el => { inputRefs.current[item.id] = el; }}
+                                    inputMode="decimal"
+                                    type="number"
+                                    min={0}
+                                    step={0.1}
+                                    value={inputDisplayValue(item.current_stock)}
+                                    onFocus={(e) => e.target.select()}
+                                    onChange={(e) => handleUpdateStock(item.id, e.target.value)}
+                                    onBlur={async () => { await handleSaveStock(item.id, item.current_stock); jumpToNextEmpty(); }}
+                                    onKeyDown={(e) => handleKeyDown(e, globalIdx, "stock")}
+                                    className="h-16 text-xl font-mono text-center font-semibold rounded-lg border-2 border-border/60 focus:border-primary/50 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                  />
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="icon"
+                                    className="h-16 w-12 shrink-0 rounded-lg text-lg"
+                                    onClick={() => {
+                                      const newVal = Number(item.current_stock ?? 0) + 1;
+                                      handleUpdateStock(item.id, String(newVal));
+                                      handleSaveStock(item.id, newVal);
+                                    }}
+                                  >
+                                    <Plus className="h-4 w-4" />
+                                  </Button>
+                                </div>
                               </div>
                               <div className="shrink-0 text-center w-16">
                                 <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1.5 block">PAR</label>
-                                <p className="h-14 flex items-center justify-center text-lg font-mono text-muted-foreground/70">
+                                <p className="h-16 flex items-center justify-center text-lg font-mono text-muted-foreground/70">
                                   {approvedPar !== null ? approvedPar : "—"}
                                 </p>
                               </div>
                               {need !== null && need > 0 && (
                                 <div className="shrink-0 text-center w-16">
                                   <label className="text-[10px] font-semibold text-warning uppercase tracking-wider mb-1.5 block">Need</label>
-                                  <p className="h-14 flex items-center justify-center text-lg font-mono text-warning font-bold">
-                                    {need % 1 === 0 ? need : need.toFixed(1)}
+                                  <p className="h-16 flex items-center justify-center text-lg font-mono text-warning font-bold">
+                                    {Math.ceil(need)}
                                   </p>
                                 </div>
                               )}
@@ -1199,13 +1245,12 @@ export default function EnterInventoryPage() {
                     <TableHeader>
                       <TableRow className="border-b border-border/20 hover:bg-transparent">
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/60 pl-5">Item</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/60 w-24">Product #</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/60 w-24">Pack Size</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/60 w-24">Last Ordered</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/60 w-36 text-center">On Hand</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/60 w-20 text-right">PAR</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/60 w-24 text-right">PAR</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/60 w-24 text-right">Price</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/60 w-20 text-right">Need</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/60 w-24 text-center pr-5">Status</TableHead>
+                        <TableHead className="w-10"></TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1226,19 +1271,20 @@ export default function EnterInventoryPage() {
                           >
                             <TableCell className="pl-5 py-3">
                               <p className="font-medium text-sm leading-tight">{item.item_name}</p>
-                              <ItemIdentityBlock
-                                brandName={item.brand_name}
-                                className="block mt-0.5"
-                              />
-                            </TableCell>
-                            <TableCell className="py-3 text-xs text-muted-foreground/60 font-mono">
-                              {getProductNumber(item) || <span className="text-muted-foreground/30">—</span>}
-                            </TableCell>
-                            <TableCell className="py-3 text-xs text-muted-foreground/60">
-                              {item.pack_size || <span className="text-muted-foreground/30">—</span>}
-                            </TableCell>
-                            <TableCell className="py-3 text-xs text-muted-foreground/60">
-                              {formatLastOrdered(getLastOrderDate(item.item_name))}
+                              <ItemIdentityBlock brandName={item.brand_name} className="block mt-0.5" />
+                              <div className="flex flex-wrap items-center gap-x-2 gap-y-0 mt-0.5">
+                                {getProductNumber(item) && (
+                                  <span className="text-[11px] text-muted-foreground/50 font-mono">#{getProductNumber(item)}</span>
+                                )}
+                                {item.pack_size && (
+                                  <span className="text-[11px] text-muted-foreground/50">{item.pack_size}</span>
+                                )}
+                                <span className="text-[11px] text-muted-foreground/40">
+                                  {formatLastOrdered(getLastOrderDate(item.item_name)) !== "—"
+                                    ? `Last: ${formatLastOrdered(getLastOrderDate(item.item_name))}`
+                                    : null}
+                                </span>
+                              </div>
                             </TableCell>
                             <TableCell className="text-center py-3">
                               <div className="flex items-center justify-center gap-2">
@@ -1261,12 +1307,19 @@ export default function EnterInventoryPage() {
                                 </div>
                               </div>
                             </TableCell>
-                            <TableCell className="text-right font-mono text-sm text-muted-foreground/60 py-3">
-                              {approvedPar !== null ? approvedPar : <span className="text-muted-foreground/30">—</span>}
+                            <TableCell className="text-right py-3">
+                              <span className="text-sm font-mono font-semibold tabular-nums text-foreground">
+                                {item.par_level != null ? Number(item.par_level).toFixed(1) : <span className="text-muted-foreground/30">—</span>}
+                              </span>
+                            </TableCell>
+                            <TableCell className="text-right py-3">
+                              <span className="text-sm font-mono tabular-nums text-foreground">
+                                {item.unit_cost != null ? `$${Number(item.unit_cost).toFixed(2)}` : <span className="text-muted-foreground/30">—</span>}
+                              </span>
                             </TableCell>
                             <TableCell className="text-right py-3">
                               {need !== null && need > 0
-                                ? <span className="font-mono text-sm font-semibold text-destructive">{need % 1 === 0 ? need : need.toFixed(1)}</span>
+                                ? <span className="font-mono text-sm font-semibold text-destructive">{Math.ceil(need)}</span>
                                 : <span className="text-muted-foreground/30 text-sm">—</span>
                               }
                             </TableCell>
@@ -1274,6 +1327,20 @@ export default function EnterInventoryPage() {
                               <Badge className={`${risk.bgClass} ${risk.textClass} border-0 text-[10px] font-medium`}>
                                 {risk.label}
                               </Badge>
+                            </TableCell>
+                            <TableCell className="py-3 pr-3" onClick={e => e.stopPropagation()}>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild onClick={e => e.stopPropagation()}>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground">
+                                    <MoreVertical className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem onClick={e => { e.stopPropagation(); const snap = item; setTimeout(() => { setEditQuickItem(snap); setEditQuickPar(snap.par_level != null ? String(snap.par_level) : ""); setEditQuickPrice(snap.unit_cost != null ? String(snap.unit_cost) : ""); }, 0); }}>
+                                    <Pencil className="h-4 w-4 mr-2" /> Edit PAR &amp; Price
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
                             </TableCell>
                           </TableRow>
                         );
@@ -1426,19 +1493,84 @@ export default function EnterInventoryPage() {
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+
+        {/* ── Edit PAR & Price Sheet ── */}
+        <Sheet open={!!editQuickItem} onOpenChange={(o) => { if (!o) setEditQuickItem(null); }}>
+          <SheetContent side="right" className="w-full sm:max-w-sm flex flex-col">
+            <SheetHeader>
+              <SheetTitle>Edit PAR &amp; Price</SheetTitle>
+              {editQuickItem && (
+                <p className="text-sm text-muted-foreground truncate">{editQuickItem.item_name}</p>
+              )}
+            </SheetHeader>
+            <div className="flex-1 py-6 space-y-5">
+              <div className="space-y-1.5">
+                <Label htmlFor="eq-par">PAR Level</Label>
+                <Input
+                  id="eq-par"
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={editQuickPar}
+                  onChange={e => setEditQuickPar(e.target.value)}
+                  placeholder="0.0"
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="eq-price">Price / Unit Cost</Label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">$</span>
+                  <Input
+                    id="eq-price"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    className="pl-7 h-10"
+                    value={editQuickPrice}
+                    onChange={e => setEditQuickPrice(e.target.value)}
+                    placeholder="0.00"
+                  />
+                </div>
+              </div>
+            </div>
+            <SheetFooter className="flex flex-col gap-2 pt-2">
+              <Button
+                className="w-full bg-orange-500 hover:bg-orange-600 text-white"
+                disabled={editQuickSaving}
+                onClick={async () => {
+                  if (!editQuickItem) return;
+                  setEditQuickSaving(true);
+                  const par = editQuickPar === "" ? null : parseFloat(editQuickPar);
+                  const price = editQuickPrice === "" ? null : parseFloat(editQuickPrice);
+                  const [parRes, priceRes] = await Promise.all([
+                    supabase.from("inventory_session_items").update({ par_level: par }).eq("id", editQuickItem.id),
+                    supabase.from("inventory_session_items").update({ unit_cost: price }).eq("id", editQuickItem.id),
+                  ]);
+                  setEditQuickSaving(false);
+                  if (parRes.error || priceRes.error) {
+                    toast.error("Could not save changes");
+                    return;
+                  }
+                  setItems(prev => prev.map(i => i.id === editQuickItem.id ? { ...i, par_level: par ?? 0, unit_cost: price } : i));
+                  toast.success("✅ Saved");
+                  setEditQuickItem(null);
+                }}
+              >
+                {editQuickSaving ? "Saving…" : "Save Changes"}
+              </Button>
+              <Button variant="outline" className="w-full" onClick={() => setEditQuickItem(null)}>
+                Cancel
+              </Button>
+            </SheetFooter>
+          </SheetContent>
+        </Sheet>
       </div>
     );
   }
 
-  // ─── MAIN DASHBOARD: COMMAND CENTER ──────────
-  const viewRiskSummary = viewItems && viewSession?.status === "APPROVED"
-    ? viewItems.reduce((acc, item) => {
-        const risk = getRisk(Number(item.current_stock), item.approved_par);
-        acc[risk.color] = (acc[risk.color] || 0) + 1;
-        return acc;
-      }, {} as Record<string, number>)
-    : null;
 
+  // ─── MAIN DASHBOARD: COMMAND CENTER ──────────
   return (
     <div className="space-y-5 animate-fade-in">
       <Breadcrumb>
@@ -1719,6 +1851,11 @@ export default function EnterInventoryPage() {
                       <DropdownMenuItem onClick={() => openSmartOrderModal(s)}>
                         <ShoppingCart className="h-3.5 w-3.5 mr-2" /> Create Smart Order
                       </DropdownMenuItem>
+                      {isManagerOrOwner && (
+                        <DropdownMenuItem className="text-destructive" onClick={() => handleDeclineToReview(s.id)}>
+                          <XCircle className="h-3.5 w-3.5 mr-2" /> Decline to Review
+                        </DropdownMenuItem>
+                      )}
                       <DropdownMenuSeparator />
                       <DropdownMenuItem className="text-destructive" onClick={() => setDeleteSessionId(s.id)}>
                         <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
@@ -1795,113 +1932,6 @@ export default function EnterInventoryPage() {
         </DialogContent>
       </Dialog>
 
-      {/* View Session Dialog */}
-      <Dialog open={!!viewItems} onOpenChange={() => { setViewItems(null); setViewSession(null); }}>
-        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              {viewSession?.name} — Items
-              {viewSession?.status === "APPROVED" && (
-                <Badge className="bg-success/10 text-success border-0 text-[10px]">Approved</Badge>
-              )}
-            </DialogTitle>
-          </DialogHeader>
-
-          {viewRiskSummary && (
-            <div className="grid grid-cols-4 gap-2 mb-2">
-              <div className="rounded-lg bg-destructive/10 p-3 text-center">
-                <p className="text-lg font-bold text-destructive">{viewRiskSummary.red || 0}</p>
-                <p className="text-[10px] font-medium text-destructive uppercase tracking-wide">Critical</p>
-              </div>
-              <div className="rounded-lg bg-warning/10 p-3 text-center">
-                <p className="text-lg font-bold text-warning">{viewRiskSummary.yellow || 0}</p>
-                <p className="text-[10px] font-medium text-warning uppercase tracking-wide">Low</p>
-              </div>
-              <div className="rounded-lg bg-success/10 p-3 text-center">
-                <p className="text-lg font-bold text-success">{viewRiskSummary.green || 0}</p>
-                <p className="text-[10px] font-medium text-success uppercase tracking-wide">OK</p>
-              </div>
-              <div className="rounded-lg bg-muted/60 p-3 text-center">
-                <p className="text-lg font-bold text-muted-foreground">{viewRiskSummary.gray || 0}</p>
-                <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">No PAR</p>
-              </div>
-            </div>
-          )}
-
-          <div className="rounded-lg border overflow-hidden">
-            <Table>
-              <TableHeader>
-                <TableRow className="bg-muted/30">
-                  <TableHead className="text-xs font-semibold">Item</TableHead>
-                  <TableHead className="text-xs font-semibold">Product #</TableHead>
-                  <TableHead className="text-xs font-semibold">Category</TableHead>
-                  <TableHead className="text-xs font-semibold">Pack Size</TableHead>
-                  <TableHead className="text-xs font-semibold">Last Ordered</TableHead>
-                  <TableHead className="text-xs font-semibold">Stock</TableHead>
-                  <TableHead className="text-xs font-semibold">PAR</TableHead>
-                  <TableHead className="text-xs font-semibold">Risk</TableHead>
-                  <TableHead className="text-xs font-semibold">Suggested Order</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {viewItems?.map((item) => {
-                  const isApproved = viewSession?.status === "APPROVED";
-                  const risk = getRisk(Number(item.current_stock), item.approved_par);
-                  const suggestedOrder = item.approved_par != null && item.approved_par > 0
-                    ? Math.max(0, item.approved_par - Number(item.current_stock))
-                    : null;
-
-                  return (
-                    <TableRow key={item.id} className={risk.bgClass}>
-                      <TableCell className="text-sm font-medium">{item.item_name}</TableCell>
-                      <TableCell className="text-xs text-muted-foreground font-mono">{getProductNumber(item) || "—"}</TableCell>
-                      <TableCell><Badge variant="secondary" className="text-[10px] font-normal">{item.category}</Badge></TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{item.pack_size || "—"}</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{formatLastOrdered(getLastOrderDate(item.item_name))}</TableCell>
-                      <TableCell className="font-mono text-sm">
-                        {isApproved ? (
-                          <span>{item.current_stock}</span>
-                        ) : (
-                          <Input
-                            type="number"
-                            inputMode="decimal"
-                            min={0}
-                            step={0.1}
-                            className="w-20 h-7 text-sm font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                            defaultValue={item.current_stock}
-                            onFocus={(e) => e.target.select()}
-                            onBlur={async (e) => {
-                              const newVal = parseFloat(e.target.value) || 0;
-                              await supabase.from("inventory_session_items")
-                                .update({ current_stock: newVal })
-                                .eq("id", item.id);
-                              setViewItems(prev => prev ? prev.map(vi =>
-                                vi.id === item.id ? { ...vi, current_stock: newVal } : vi
-                              ) : prev);
-                            }}
-                          />
-                        )}
-                      </TableCell>
-                      <TableCell className="font-mono text-sm text-muted-foreground">
-                        {item.approved_par !== null && item.approved_par !== undefined ? item.approved_par : "—"}
-                      </TableCell>
-                      <TableCell>
-                        <Badge className={`${risk.bgClass} ${risk.textClass} border-0 text-[10px]`}>
-                          {risk.label}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="font-mono text-sm">
-                        {suggestedOrder !== null ? suggestedOrder.toFixed(1) : "—"}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </div>
-        </DialogContent>
-      </Dialog>
-
       {/* Clear Entries Confirm */}
       <AlertDialog open={!!clearEntriesSessionId} onOpenChange={(o) => !o && setClearEntriesSessionId(null)}>
         <AlertDialogContent>
@@ -1929,6 +1959,7 @@ export default function EnterInventoryPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
     </div>
   );
 }

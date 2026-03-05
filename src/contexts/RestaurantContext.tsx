@@ -137,7 +137,7 @@ export function RestaurantProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     fetchRestaurants();
-  }, [user]);
+  }, [user?.id]);
 
   // Fetch locations when restaurant changes
   useEffect(() => {

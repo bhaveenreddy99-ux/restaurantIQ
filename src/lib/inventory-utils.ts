@@ -156,7 +156,7 @@ export function isDecimalUnitType(unit: string | null | undefined): boolean {
   return ["LB", "LBS", "GAL", "GALLON", "GALLONS", "OZ", "KG", "LITER", "L"].includes(u);
 }
 
-/** Compute smart order quantity with proper rounding rules */
+/** Compute order quantity — always rounds UP to whole number, no decimals */
 export function computeOrderQty(
   currentStock: number | null | undefined,
   parLevel: number | null | undefined,
@@ -165,22 +165,9 @@ export function computeOrderQty(
 ): number {
   const stock = currentStock ?? 0;
   const par = parLevel ?? 0;
-  
   if (par <= 0) return 0;
-  
   const needRaw = par - stock;
   if (needRaw <= 0) return 0;
-
-  if (isWholeUnitType(unit, packSize)) {
-    return Math.ceil(needRaw);
-  }
-
-  if (isDecimalUnitType(unit)) {
-    // Round to 0.1
-    return Math.round(needRaw * 10) / 10;
-  }
-
-  // Default: round up to whole number for safety
   return Math.ceil(needRaw);
 }
 

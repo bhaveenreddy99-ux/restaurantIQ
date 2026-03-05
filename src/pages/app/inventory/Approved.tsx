@@ -3,11 +3,15 @@ import { supabase } from "@/integrations/supabase/client";
 import { useRestaurant } from "@/contexts/RestaurantContext";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
-import { CheckCircle, ShoppingCart, ChevronDown, ChevronRight } from "lucide-react";
+import { CheckCircle, ShoppingCart, ChevronDown, ChevronRight, XCircle } from "lucide-react";
 import { ExportButtons } from "@/components/ExportButtons";
 import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
+import { useLastOrderDates } from "@/hooks/useLastOrderDates";
+import { format } from "date-fns";
 
 function getRisk(currentStock: number, parLevel: number | null | undefined): { label: string; bgClass: string; textClass: string } {
   if (parLevel === null || parLevel === undefined || parLevel <= 0) {
@@ -29,12 +33,26 @@ function formatDateTime(isoString: string) {
 }
 
 export default function ApprovedPage() {
-  const { currentRestaurant } = useRestaurant();
+  const { currentRestaurant, currentLocation } = useRestaurant();
   const navigate = useNavigate();
+  const { lastOrderDates } = useLastOrderDates(currentRestaurant?.id, currentLocation?.id);
   const [sessions, setSessions] = useState<any[]>([]);
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
   const [sessionItems, setSessionItems] = useState<Record<string, any[]>>({});
   const [loadingSession, setLoadingSession] = useState<string | null>(null);
+  const [decliningId, setDecliningId] = useState<string | null>(null);
+  const [localSuggestedOrder, setLocalSuggestedOrder] = useState<Record<string, string>>({});
+
+  const isManagerOrOwner = currentRestaurant?.role === "OWNER" || currentRestaurant?.role === "MANAGER";
+
+  const handleDecline = async (sessionId: string) => {
+    setDecliningId(sessionId);
+    const { error } = await supabase.from("inventory_sessions").update({ status: "IN_REVIEW", updated_at: new Date().toISOString() }).eq("id", sessionId);
+    setDecliningId(null);
+    if (error) { toast.error(error.message); return; }
+    toast.success("Session moved back to Review");
+    setSessions(prev => prev.filter(s => s.id !== sessionId));
+  };
 
   useEffect(() => {
     if (!currentRestaurant) return;
@@ -73,9 +91,17 @@ export default function ApprovedPage() {
       (parItems || []).forEach(p => { parMap[p.item_name] = Number(p.par_level); });
     }
 
+    const { data: catalogItems } = await supabase
+      .from("inventory_catalog_items")
+      .select("id, item_name")
+      .eq("inventory_list_id", session.inventory_list_id);
+    const catalogIdMap: Record<string, string> = {};
+    (catalogItems || []).forEach(c => { catalogIdMap[c.item_name] = c.id; });
+
     const enriched = (items || []).map(item => ({
       ...item,
       approved_par: parMap[item.item_name] !== undefined ? parMap[item.item_name] : (Number(item.par_level) || null),
+      catalog_item_id: catalogIdMap[item.item_name] || null,
     }));
 
     setSessionItems(prev => ({ ...prev, [session.id]: enriched }));
@@ -152,6 +178,14 @@ export default function ApprovedPage() {
                                 }}
                               />
                             )}
+                            {isManagerOrOwner && (
+                              <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 border-destructive/30 text-destructive hover:bg-destructive/10"
+                                disabled={decliningId === s.id}
+                                onClick={() => handleDecline(s.id)}>
+                                <XCircle className="h-3 w-3" />
+                                {decliningId === s.id ? "Declining…" : "Decline"}
+                              </Button>
+                            )}
                           </div>
                         </div>
                       </TableCell>
@@ -161,13 +195,11 @@ export default function ApprovedPage() {
                     {isExpanded && (
                       <TableRow key={`cols-${s.id}`} className="bg-muted/10">
                         <TableHead className="text-xs font-semibold pl-12">Item</TableHead>
-                        <TableHead className="text-xs font-semibold">Category</TableHead>
-                        <TableHead className="text-xs font-semibold">Pack Size</TableHead>
-                        <TableHead className="text-xs font-semibold">Stock</TableHead>
-                        <TableHead className="text-xs font-semibold">PAR</TableHead>
-                        <TableHead className="text-xs font-semibold">Risk</TableHead>
-                        <TableHead className="text-xs font-semibold">Suggested Order</TableHead>
-                        <TableHead className="text-xs font-semibold">Unit Cost</TableHead>
+                        <TableHead className="text-xs font-semibold text-center">Stock</TableHead>
+                        <TableHead className="text-xs font-semibold text-right">PAR</TableHead>
+                        <TableHead className="text-xs font-semibold text-center">Risk</TableHead>
+                        <TableHead className="text-xs font-semibold text-center">Suggested Order</TableHead>
+                        <TableHead className="text-xs font-semibold text-right">Unit Cost</TableHead>
                         <TableHead />
                       </TableRow>
                     )}
@@ -184,29 +216,54 @@ export default function ApprovedPage() {
                     {/* Item rows */}
                     {isExpanded && items && items.map(item => {
                       const risk = getRisk(Number(item.current_stock), item.approved_par);
-                      const suggestedOrder = item.approved_par != null && item.approved_par > 0
+                      const computedOrder = item.approved_par != null && item.approved_par > 0
                         ? Math.max(0, item.approved_par - Number(item.current_stock))
                         : null;
+                      const lastOrderDate = item.catalog_item_id ? lastOrderDates[item.catalog_item_id] : null;
+                      const lastOrderStr = lastOrderDate ? format(new Date(lastOrderDate), "MM/dd/yy") : null;
+                      const localVal = localSuggestedOrder[item.id];
+                      const displayOrder = localVal !== undefined ? localVal : (computedOrder !== null ? String(computedOrder % 1 === 0 ? computedOrder : parseFloat(computedOrder.toFixed(2))) : "");
                       return (
                         <TableRow key={item.id} className={`${risk.bgClass} border-b border-border/30`}>
-                          <TableCell className="text-sm font-medium pl-12">{item.item_name}</TableCell>
-                          <TableCell>
-                            <Badge variant="secondary" className="text-[10px] font-normal">{item.category || "—"}</Badge>
+                          <TableCell className="pl-12 py-3">
+                            <p className="text-sm font-medium leading-tight">{item.item_name}</p>
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-0 mt-0.5">
+                              {item.category && (
+                                <span className="text-[11px] text-muted-foreground/60">{item.category}</span>
+                              )}
+                              {item.pack_size && (
+                                <span className="text-[11px] text-muted-foreground/50 font-mono">{item.pack_size}</span>
+                              )}
+                              {lastOrderStr && (
+                                <span className="text-[11px] text-muted-foreground/40">Last: {lastOrderStr}</span>
+                              )}
+                            </div>
                           </TableCell>
-                          <TableCell className="text-xs text-muted-foreground">{item.pack_size || "—"}</TableCell>
-                          <TableCell className="font-mono text-sm">{Number(item.current_stock) % 1 === 0 ? Number(item.current_stock) : parseFloat(Number(item.current_stock).toFixed(2))}</TableCell>
-                          <TableCell className="font-mono text-sm text-muted-foreground">
+                          <TableCell className="font-mono text-sm text-center py-3">
+                            {Number(item.current_stock) % 1 === 0 ? Number(item.current_stock) : parseFloat(Number(item.current_stock).toFixed(2))}
+                          </TableCell>
+                          <TableCell className="font-mono text-sm text-muted-foreground text-right py-3">
                             {item.approved_par !== null && item.approved_par !== undefined ? item.approved_par : "—"}
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="text-center py-3">
                             <Badge className={`${risk.bgClass} ${risk.textClass} border-0 text-[10px]`}>
                               {risk.label}
                             </Badge>
                           </TableCell>
-                          <TableCell className="font-mono text-sm">
-                            {suggestedOrder !== null ? (suggestedOrder % 1 === 0 ? suggestedOrder : parseFloat(suggestedOrder.toFixed(2))) : "—"}
+                          <TableCell className="text-center py-3">
+                            <Input
+                              type="number"
+                              inputMode="decimal"
+                              min={0}
+                              step={0.1}
+                              value={displayOrder}
+                              onChange={e => setLocalSuggestedOrder(prev => ({ ...prev, [item.id]: e.target.value }))}
+                              onFocus={e => e.target.select()}
+                              placeholder="—"
+                              className="w-20 h-8 text-sm font-mono text-center mx-auto block [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none rounded-lg border-2 border-border/50 focus:border-primary/50"
+                            />
                           </TableCell>
-                          <TableCell className="font-mono text-sm">
+                          <TableCell className="font-mono text-sm text-right py-3">
                             {item.unit_cost ? `$${Number(item.unit_cost).toFixed(2)}` : "—"}
                           </TableCell>
                           <TableCell />

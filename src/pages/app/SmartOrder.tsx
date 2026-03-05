@@ -6,6 +6,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -18,7 +19,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
-import { ShoppingCart, DollarSign, AlertTriangle, Package, Eye, ArrowLeft, Trash2, ExternalLink, Info } from "lucide-react";
+import { ShoppingCart, DollarSign, AlertTriangle, Package, Eye, ArrowLeft, Trash2, ExternalLink, Info, Pencil } from "lucide-react";
 import { ExportButtons } from "@/components/ExportButtons";
 import { getRisk, formatNum, formatCurrency, computeNeedRaw, isWholeUnitType, type RiskLevel } from "@/lib/inventory-utils";
 import ItemIdentityBlock from "@/components/ItemIdentityBlock";
@@ -35,6 +36,9 @@ export default function SmartOrderPage() {
   const [selectedRun, setSelectedRun] = useState<any>(null);
   const [runItems, setRunItems] = useState<any[]>([]);
   const [deleteRunId, setDeleteRunId] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [editingRunItem, setEditingRunItem] = useState<string | null>(null);
+  const [editRunValues, setEditRunValues] = useState<{ par_level: string; unit_cost: string }>({ par_level: "", unit_cost: "" });
 
   // Filters
   const [dateFilter, setDateFilter] = useState("30");
@@ -134,6 +138,34 @@ export default function SmartOrderPage() {
     }
   };
 
+  const handleSubmitOrder = async () => {
+    if (!selectedRun || !user) return;
+    setSubmitting(true);
+    try {
+      // Generate PO number if not already submitted
+      let poNumber = selectedRun.po_number;
+      if (!poNumber) {
+        poNumber = `PO-${Date.now().toString().slice(-6)}`;
+        const { error: poErr } = await supabase
+          .from("smart_order_runs")
+          .update({ po_number: poNumber })
+          .eq("id", selectedRun.id);
+        if (poErr) throw poErr;
+      }
+
+      const { error } = await supabase.rpc('submit_smart_order', { p_run_id: selectedRun.id });
+      if (error) throw error;
+
+      setSelectedRun((prev: any) => ({ ...prev, status: 'submitted', po_number: poNumber }));
+      setRuns(prev => prev.map(r => r.id === selectedRun.id ? { ...r, status: 'submitted', po_number: poNumber } : r));
+      toast.success(selectedRun.status === 'submitted' ? 'Purchase History updated' : `Order submitted — ${poNumber}`);
+    } catch (e: any) {
+      toast.error(`Submit failed: ${e.message}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const riskBadge = (risk: string, currentStock?: number, parLevel?: number) => {
     const riskInfo = getRisk(currentStock, parLevel);
     const badgeClass = risk === "RED" ? "bg-destructive/10 text-destructive"
@@ -184,12 +216,27 @@ export default function SmartOrderPage() {
               </p>
             </div>
           </div>
-          <div className="flex gap-2">
-             <ExportButtons
+          <div className="flex items-center gap-2">
+            {selectedRun.status === 'submitted' && (
+              <Badge className="bg-primary/10 text-primary border-0 text-[11px]">
+                {selectedRun.po_number ? selectedRun.po_number : 'Submitted'}
+              </Badge>
+            )}
+            <ExportButtons
               items={displayItems.map(i => ({ ...i, suggestedOrder: i.suggested_order, pack_size: i.pack_size }))}
               filename="smart-order"
               type="smartorder"
             />
+            <Button
+              size="sm"
+              variant={selectedRun.status === 'submitted' ? 'outline' : 'default'}
+              className="gap-1.5"
+              disabled={submitting}
+              onClick={handleSubmitOrder}
+            >
+              <ShoppingCart className="h-3.5 w-3.5" />
+              {submitting ? 'Saving…' : selectedRun.status === 'submitted' ? 'Update Purchase History' : 'Submit Order'}
+            </Button>
             <Button variant="outline" size="sm" className="gap-1.5" onClick={() => {
               window.location.href = "/app/purchase-history";
             }}>
@@ -271,9 +318,9 @@ export default function SmartOrderPage() {
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger className="flex items-center gap-1">
-                        PAR <Info className="h-3 w-3 text-muted-foreground" />
+                        PAR <Info className="h-3 w-3 text-muted-foreground" /> <Pencil className="h-3 w-3 text-muted-foreground/40" />
                       </TooltipTrigger>
-                      <TooltipContent><p className="text-xs max-w-xs">Target stock level for this item. Smart Order will refill up to this target.</p></TooltipContent>
+                      <TooltipContent><p className="text-xs max-w-xs">Target stock level. Click a value to edit.</p></TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
                 </TableHead>
@@ -288,7 +335,9 @@ export default function SmartOrderPage() {
                      </Tooltip>
                    </TooltipProvider>
                  </TableHead>
-                 <TableHead className="text-xs font-semibold">Est. Cost</TableHead>
+                 <TableHead className="text-xs font-semibold">
+                   <span className="flex items-center gap-1">Est. Cost <Pencil className="h-3 w-3 text-muted-foreground/40" /></span>
+                 </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -323,11 +372,71 @@ export default function SmartOrderPage() {
                     })()}
                   </TableCell>
                   <TableCell className="font-mono text-sm">{formatNum(i.current_stock)}</TableCell>
-                  <TableCell className="font-mono text-sm text-muted-foreground">{formatNum(i.par_level)}</TableCell>
-                  <TableCell className="font-mono text-sm text-muted-foreground">{computeNeedRaw(i.current_stock, i.par_level) > 0 ? formatNum(computeNeedRaw(i.current_stock, i.par_level)) : "—"}</TableCell>
+                  <TableCell className="font-mono text-sm text-muted-foreground">
+                    {editingRunItem === `${i.id}_par` ? (
+                      <Input
+                        autoFocus
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        step={0.1}
+                        className="w-20 h-8 text-sm font-mono text-right [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                        value={editRunValues.par_level}
+                        onFocus={e => e.target.select()}
+                        onChange={e => setEditRunValues(prev => ({ ...prev, par_level: e.target.value }))}
+                        onBlur={async () => {
+                          const parsed = parseFloat(editRunValues.par_level) || 0;
+                          setRunItems(prev => prev.map(r => r.id === i.id ? { ...r, par_level: parsed } : r));
+                          await supabase.from("smart_order_run_items").update({ par_level: parsed }).eq("id", i.id);
+                          setEditingRunItem(null);
+                        }}
+                        onKeyDown={e => { if (e.key === "Escape") setEditingRunItem(null); if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                      />
+                    ) : (
+                      <button
+                        className="font-mono text-sm text-muted-foreground hover:text-foreground hover:underline decoration-dashed underline-offset-2 cursor-pointer"
+                        onClick={() => { setEditingRunItem(`${i.id}_par`); setEditRunValues({ par_level: String(i.par_level ?? ""), unit_cost: String(i.unit_cost ?? "") }); }}
+                        title="Click to edit PAR"
+                      >
+                        {formatNum(i.par_level)}
+                      </button>
+                    )}
+                  </TableCell>
+                  <TableCell className="font-mono text-sm text-muted-foreground">{computeNeedRaw(i.current_stock, i.par_level) > 0 ? String(Math.ceil(computeNeedRaw(i.current_stock, i.par_level))) : "—"}</TableCell>
                   <TableCell className="font-mono text-sm font-bold">{i.suggested_order > 0 ? String(Math.round(i.suggested_order)) : "—"}</TableCell>
                   <TableCell className="font-mono text-sm">
-                     {i.unit_cost && i.suggested_order > 0 ? formatCurrency(Math.round(i.suggested_order) * Number(i.unit_cost)) : "—"}
+                    {editingRunItem === `${i.id}_cost` ? (
+                      <Input
+                        autoFocus
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        step={0.01}
+                        className="w-24 h-8 text-sm font-mono text-right [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                        value={editRunValues.unit_cost}
+                        placeholder="Unit price"
+                        onFocus={e => e.target.select()}
+                        onChange={e => setEditRunValues(prev => ({ ...prev, unit_cost: e.target.value }))}
+                        onBlur={async () => {
+                          const parsed = parseFloat(editRunValues.unit_cost) || null;
+                          setRunItems(prev => prev.map(r => r.id === i.id ? { ...r, unit_cost: parsed } : r));
+                          await supabase.from("smart_order_run_items").update({ unit_cost: parsed }).eq("id", i.id);
+                          setEditingRunItem(null);
+                        }}
+                        onKeyDown={e => { if (e.key === "Escape") setEditingRunItem(null); if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                      />
+                    ) : (
+                      <button
+                        className="font-mono text-sm hover:underline decoration-dashed underline-offset-2 cursor-pointer"
+                        onClick={() => { setEditingRunItem(`${i.id}_cost`); setEditRunValues({ par_level: String(i.par_level ?? ""), unit_cost: String(i.unit_cost ?? "") }); }}
+                        title="Click to edit unit price"
+                      >
+                        {i.unit_cost && i.suggested_order > 0
+                          ? formatCurrency(Math.round(i.suggested_order) * Number(i.unit_cost))
+                          : <span className="text-muted-foreground/40">—</span>
+                        }
+                      </button>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}

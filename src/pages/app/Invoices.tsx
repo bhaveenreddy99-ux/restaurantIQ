@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useRestaurant } from "@/contexts/RestaurantContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -15,7 +16,7 @@ import { toast } from "sonner";
 import {
   FileText, Upload, Plus, Search, Loader2, Check, AlertTriangle,
   DollarSign, Package, Calendar, Truck, Eye, Trash2,
-  Info, Plug, PenLine, Save
+  Info, Plug, PenLine, Save, ClipboardCheck
 } from "lucide-react";
 import { formatNum } from "@/lib/inventory-utils";
 import * as XLSX from "xlsx";
@@ -34,6 +35,7 @@ const STATUS_CONFIG: Record<InvoiceStatus, { label: string; color: string; bgCol
 export default function InvoicesPage() {
   const { currentRestaurant } = useRestaurant();
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [purchases, setPurchases] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
@@ -173,9 +175,17 @@ export default function InvoicesPage() {
     } else if (isPDF) {
       setParsing(true);
       try {
-        const text = await file.text();
+        // Convert PDF to base64 so Claude can read the actual document content
+        const arrayBuffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuffer);
+        let binary = "";
+        const chunkSize = 8192;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+        }
+        const base64 = btoa(binary);
         const { data: result, error } = await supabase.functions.invoke("parse-invoice", {
-          body: { content: text, file_type: "PDF" },
+          body: { content: base64, file_type: "PDF" },
         });
         if (error) throw error;
         if (result.error) throw new Error(result.error);
@@ -376,6 +386,7 @@ export default function InvoicesPage() {
   // Stats
   const draftCount = purchases.filter(p => p.invoice_status === "DRAFT").length;
   const receivedCount = purchases.filter(p => p.invoice_status === "RECEIVED").length;
+  const pendingReviewCount = purchases.filter(p => !p.receipt_status || p.receipt_status === "pending" || p.receipt_status === "reviewing").length;
   const unmatchedCount = items.filter(i => i.match_status === "UNMATCHED").length;
   const canPost = items.length > 0 && unmatchedCount === 0 && header.vendor_name.trim();
 
@@ -383,6 +394,15 @@ export default function InvoicesPage() {
     const s = status === "COMPLETE" ? "POSTED" : (status as InvoiceStatus);
     const config = STATUS_CONFIG[s] || STATUS_CONFIG.POSTED;
     return <Badge className={`${config.bgColor} ${config.color} text-[10px] border`}>{config.label}</Badge>;
+  };
+
+  const getReceiptStatusBadge = (status: string | null | undefined) => {
+    switch (status) {
+      case "confirmed": return <Badge className="bg-success/10 text-success border-0 text-[10px]">Confirmed</Badge>;
+      case "issues_reported": return <Badge className="bg-orange-500/10 text-orange-600 border-0 text-[10px]">Issues</Badge>;
+      case "reviewing": return <Badge className="bg-blue-500/10 text-blue-600 border-0 text-[10px]">Reviewing</Badge>;
+      default: return null;
+    }
   };
 
   return (
@@ -636,6 +656,18 @@ export default function InvoicesPage() {
         </Card>
       </div>
 
+      {/* Pending Review Banner */}
+      {pendingReviewCount > 0 && (
+        <Card className="border-warning/30 bg-warning/5">
+          <CardContent className="flex items-center gap-3 p-4">
+            <AlertTriangle className="h-5 w-5 text-warning flex-shrink-0" />
+            <p className="text-sm text-warning flex-1">
+              <span className="font-semibold">{pendingReviewCount} invoice{pendingReviewCount > 1 ? "s" : ""}</span> pending receipt review. Click <strong>Review</strong> on each invoice to confirm delivery and report issues.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Invoice List */}
       {loading ? (
         <Card><CardContent className="p-8 text-center text-muted-foreground">Loading...</CardContent></Card>
@@ -664,6 +696,7 @@ export default function InvoicesPage() {
                         <p className="text-sm font-medium">{p.vendor_name || "Unknown Vendor"}</p>
                         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
                           {p.invoice_number && <span className="font-mono">#{p.invoice_number}</span>}
+                          {p.po_number && <span className="font-mono text-primary/70">PO: {p.po_number}</span>}
                           <span>{new Date(p.created_at).toLocaleDateString()}</span>
                           {p.invoice_date && <span>· Invoice: {new Date(p.invoice_date).toLocaleDateString()}</span>}
                         </div>
@@ -672,11 +705,20 @@ export default function InvoicesPage() {
                   </div>
                   <div className="flex items-center gap-2">
                     {getStatusBadge(status)}
+                    {getReceiptStatusBadge(p.receipt_status)}
                     {isEditable && (
                       <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => handleEditInvoice(p)}>
                         <PenLine className="h-3.5 w-3.5" />
                       </Button>
                     )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 px-2 gap-1 text-[11px]"
+                      onClick={() => navigate(`/app/invoices/${p.id}/review`)}
+                    >
+                      <ClipboardCheck className="h-3.5 w-3.5" /> Review
+                    </Button>
                     <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => handleViewPurchase(p)}>
                       <Eye className="h-3.5 w-3.5" />
                     </Button>

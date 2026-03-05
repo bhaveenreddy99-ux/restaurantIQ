@@ -17,16 +17,19 @@ import AppLayout from "@/layouts/AppLayout";
 import DashboardPage from "@/pages/app/Dashboard";
 import ListManagementPage from "@/pages/app/ListManagement";
 import EnterInventoryPage from "@/pages/app/inventory/EnterInventory";
-// Review and Approved pages removed from sidebar — redirects handle old URLs
+import ReviewPage from "@/pages/app/inventory/Review";
+import ApprovedPage from "@/pages/app/inventory/Approved";
 import ImportPage from "@/pages/app/inventory/Import";
 import SmartOrderPage from "@/pages/app/SmartOrder";
 import PARManagementPage from "@/pages/app/PARManagement";
 import PARSuggestionsPage from "@/pages/app/PARSuggestions";
 
 import InvoicesPage from "@/pages/app/Invoices";
+import InvoiceReviewPage from "@/pages/app/InvoiceReview";
 import ReportsPage from "@/pages/app/Reports";
 import StaffPage from "@/pages/app/Staff";
 import PurchaseHistoryPage from "@/pages/app/PurchaseHistory";
+import WasteLogPage from "@/pages/app/WasteLog";
 import SettingsPage from "@/pages/app/Settings";
 import NotificationsPage from "@/pages/app/Notifications";
 import AlertSettingsPage from "@/pages/app/settings/AlertSettings";
@@ -59,19 +62,20 @@ const App = () => (
                 <Route path="dashboard" element={<DashboardPage />} />
                 <Route path="inventory/lists" element={<ListManagementPage />} />
                 <Route path="inventory/enter" element={<EnterInventoryPage />} />
-                {/* Review and Approved routes kept for backward compat but redirect */}
-                <Route path="inventory/review" element={<Navigate to="/app/inventory/enter" replace />} />
-                <Route path="inventory/approved" element={<Navigate to="/app/inventory/enter" replace />} />
+                <Route path="inventory/review" element={<ReviewPage />} />
+                <Route path="inventory/approved" element={<ApprovedPage />} />
                 <Route path="inventory/import/:listId" element={<ImportPage />} />
                 <Route path="smart-order" element={<SmartOrderPage />} />
                 <Route path="par" element={<PARManagementPage />} />
                 <Route path="par/suggestions" element={<PARSuggestionsPage />} />
                 
                 <Route path="invoices" element={<InvoicesPage />} />
+                <Route path="invoices/:id/review" element={<InvoiceReviewPage />} />
                 <Route path="orders" element={<Navigate to="/app/invoices" replace />} />
                 <Route path="reports" element={<ReportsPage />} />
                 <Route path="staff" element={<OwnerRoute><StaffPage /></OwnerRoute>} />
                 <Route path="purchase-history" element={<PurchaseHistoryPage />} />
+                <Route path="waste-log" element={<WasteLogPage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
                 <Route path="settings" element={<OwnerRoute><SettingsPage /></OwnerRoute>} />
                 <Route path="settings/alerts" element={<OwnerRoute><AlertSettingsPage /></OwnerRoute>} />

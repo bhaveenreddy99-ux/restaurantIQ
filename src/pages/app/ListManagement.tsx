@@ -26,6 +26,7 @@ import {
   BreadcrumbPage, BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetFooter } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
@@ -73,6 +74,7 @@ interface IssueItem {
   vendor_sku: string | null;
   vendor_name: string | null;
   default_unit_cost: number | null;
+  default_par_level: number | null;
   reasons: string[];
 }
 
@@ -84,6 +86,7 @@ interface ListCategory {
   name: string;
   sort_order: number;
   category_set_id: string | null;
+  parent_category_id?: string | null;
 }
 
 interface CategorySet {
@@ -130,6 +133,7 @@ function IssueRow({ item, onFix, onQuickSave }: {
   const [vendorSku, setVendorSku] = useState(item.vendor_sku || "");
   const [vendorName, setVendorName] = useState(item.vendor_name || "");
   const [unitCost, setUnitCost] = useState(item.default_unit_cost != null ? String(item.default_unit_cost) : "");
+  const [parLevel, setParLevel] = useState(item.default_par_level != null ? String(item.default_par_level) : "");
 
   if (editing) {
     return (
@@ -146,6 +150,8 @@ function IssueRow({ item, onFix, onQuickSave }: {
         <TableCell><Input className="h-7 text-xs w-24" value={vendorName} onChange={e => setVendorName(e.target.value)} placeholder="Vendor" /></TableCell>
         <TableCell className="text-xs">{item.unit || <span className="text-destructive">Missing</span>}</TableCell>
         <TableCell className="text-xs">{item.pack_size || <span className="text-destructive">Missing</span>}</TableCell>
+        <TableCell><Input className="h-7 text-xs w-20" type="number" step="0.01" value={unitCost} onChange={e => setUnitCost(e.target.value)} placeholder="Cost" /></TableCell>
+        <TableCell><Input className="h-7 text-xs w-20" type="number" step="0.1" value={parLevel} onChange={e => setParLevel(e.target.value)} placeholder="PAR" /></TableCell>
         <TableCell>
           <div className="flex gap-1">
             <Button size="sm" variant="default" className="h-7 text-xs px-2 bg-gradient-amber" onClick={async () => {
@@ -153,6 +159,7 @@ function IssueRow({ item, onFix, onQuickSave }: {
               if (vendorSku) updates.vendor_sku = vendorSku;
               if (vendorName) updates.vendor_name = vendorName;
               if (unitCost) updates.default_unit_cost = parseFloat(unitCost) || null;
+              if (parLevel) updates.default_par_level = parseFloat(parLevel) || null;
               if (Object.keys(updates).length > 0) await onQuickSave(item.id, updates);
               setEditing(false);
             }}>
@@ -181,6 +188,8 @@ function IssueRow({ item, onFix, onQuickSave }: {
       <TableCell className="text-xs">{item.vendor_name || <span className="text-destructive">Missing</span>}</TableCell>
       <TableCell className="text-xs">{item.unit || <span className="text-destructive">Missing</span>}</TableCell>
       <TableCell className="text-xs">{item.pack_size || <span className="text-destructive">Missing</span>}</TableCell>
+      <TableCell className="text-xs font-mono">{item.default_unit_cost != null ? `$${Number(item.default_unit_cost).toFixed(2)}` : <span className="text-destructive">Missing</span>}</TableCell>
+      <TableCell className="text-xs font-mono">{item.default_par_level != null ? Number(item.default_par_level).toFixed(1) : <span className="text-muted-foreground/50">—</span>}</TableCell>
       <TableCell>
         <div className="flex gap-1">
           <Button size="sm" variant="outline" className="h-7 text-xs px-2" onClick={() => setEditing(true)}>
@@ -196,6 +205,394 @@ function IssueRow({ item, onFix, onQuickSave }: {
 }
 
 // ─── COMPONENT ──────────────────────────────────
+
+// ═══════════════════════════════════════════════════════
+// CATEGORY BUILDER OVERLAY — Full Screen Category Manager
+// ═══════════════════════════════════════════════════════
+interface CategoryBuilderOverlayProps {
+  listName: string;
+  catalogItems: any[];
+  currentCats: any[];
+  getCurrentMappings: () => any[];
+  onClose: () => void;
+  onAddCategory: () => void;
+  newListCategoryName: string;
+  setNewListCategoryName: (v: string) => void;
+  onRenameCategory: (cat: any, name: string) => void;
+  onDeleteCategory: (cat: any) => void;
+  onAssignItem: (itemId: string, categoryId: string | null) => Promise<void>;
+  onReorderCategories: (reordered: any[]) => Promise<void>;
+  onAddSubCategory: (parentId: string, name: string) => Promise<void>;
+}
+
+function CategoryBuilderOverlay({
+  listName, catalogItems, currentCats, getCurrentMappings,
+  onClose, onAddCategory, newListCategoryName, setNewListCategoryName,
+  onRenameCategory, onDeleteCategory, onAssignItem, onReorderCategories, onAddSubCategory,
+}: CategoryBuilderOverlayProps) {
+  const [selectedCatId, setSelectedCatId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameVal, setRenameVal] = useState("");
+  const [subCatInput, setSubCatInput] = useState<string | null>(null);
+  const [subCatName, setSubCatName] = useState("");
+  const [dragOverCat, setDragOverCat] = useState<string | null>(null);
+  const [draggingCatId, setDraggingCatId] = useState<string | null>(null);
+  const [draggingItemId, setDraggingItemId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const mappings = getCurrentMappings();
+
+  // Top-level categories only
+  const topCats = currentCats
+    .filter(c => !c.parent_category_id)
+    .sort((a, b) => a.sort_order - b.sort_order);
+
+  // Sub-categories of a given parent
+  const getSubCats = (parentId: string) =>
+    currentCats.filter(c => c.parent_category_id === parentId).sort((a, b) => a.sort_order - b.sort_order);
+
+  // Items assigned to a category
+  const getItemsInCat = (catId: string) => {
+    const assignedIds = new Set(mappings.filter(m => m.category_id === catId).map(m => m.catalog_item_id));
+    return catalogItems.filter(i => assignedIds.has(i.id));
+  };
+
+  // Unassigned items
+  const assignedItemIds = new Set(mappings.filter(m => m.category_id).map(m => m.catalog_item_id));
+  const unassignedItems = catalogItems.filter(i => !assignedItemIds.has(i.id));
+
+  // Items to show in right panel
+  const selectedCat = currentCats.find(c => c.id === selectedCatId);
+  const rightPanelItems = selectedCatId ? getItemsInCat(selectedCatId) : unassignedItems;
+  const rightPanelTitle = selectedCat ? selectedCat.name : "Unassigned Items";
+
+  // ── Drag item from right panel into a category
+  const handleItemDragStart = (itemId: string) => setDraggingItemId(itemId);
+  const handleItemDragEnd = () => { setDraggingItemId(null); setDragOverCat(null); };
+  const handleCatDrop = async (catId: string) => {
+    if (!draggingItemId) return;
+    setSaving(true);
+    await onAssignItem(draggingItemId, catId);
+    setSaving(false);
+    setDraggingItemId(null);
+    setDragOverCat(null);
+  };
+
+  // ── Drag category to reorder
+  const handleCatDragStart = (catId: string) => setDraggingCatId(catId);
+  const handleCatDragOver = (e: React.DragEvent, catId: string) => {
+    e.preventDefault();
+    if (draggingCatId && draggingCatId !== catId) setDragOverCat(catId);
+  };
+  const handleCatDropReorder = async (targetId: string) => {
+    if (!draggingCatId || draggingCatId === targetId) { setDraggingCatId(null); setDragOverCat(null); return; }
+    const reordered = [...topCats];
+    const fromIdx = reordered.findIndex(c => c.id === draggingCatId);
+    const toIdx = reordered.findIndex(c => c.id === targetId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const [moved] = reordered.splice(fromIdx, 1);
+    reordered.splice(toIdx, 0, moved);
+    await onReorderCategories(reordered);
+    setDraggingCatId(null);
+    setDragOverCat(null);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col bg-background animate-in fade-in duration-200">
+
+      {/* ── Top Bar ── */}
+      <div className="flex items-center justify-between px-6 py-4 border-b bg-card shrink-0">
+        <div className="flex items-center gap-4">
+          <button onClick={onClose} className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors text-sm font-medium">
+            <ArrowLeft className="h-4 w-4" />
+            Back to {listName}
+          </button>
+          <div className="w-px h-5 bg-border" />
+          <div>
+            <h1 className="text-base font-bold tracking-tight">Create Categories</h1>
+            <p className="text-xs text-muted-foreground">{listName} · {currentCats.filter(c => !c.parent_category_id).length} categories · {catalogItems.length} items</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {saving && <span className="text-xs text-muted-foreground animate-pulse">Saving...</span>}
+          <div className="flex items-center gap-2 bg-muted/40 rounded-lg p-1.5 border">
+            <Input
+              value={newListCategoryName}
+              onChange={e => setNewListCategoryName(e.target.value)}
+              placeholder="New category name..."
+              className="h-8 text-sm w-48 border-0 bg-transparent focus-visible:ring-0 px-2"
+              onKeyDown={e => e.key === "Enter" && onAddCategory()}
+            />
+            <Button size="sm" onClick={onAddCategory} disabled={!newListCategoryName.trim()} className="h-8 px-3 bg-gradient-amber gap-1.5 text-xs">
+              <FolderPlus className="h-3.5 w-3.5" /> Create
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Body: Left + Right Panels ── */}
+      <div className="flex flex-1 min-h-0">
+
+        {/* LEFT: Category Tree */}
+        <div className="w-72 shrink-0 border-r flex flex-col bg-muted/10">
+          <div className="px-4 py-3 border-b">
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Categories</p>
+          </div>
+          <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1">
+
+            {/* Unassigned */}
+            <button
+              onClick={() => setSelectedCatId(null)}
+              className={"w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left text-sm transition-colors " + (!selectedCatId ? "bg-primary/10 text-primary font-semibold" : "hover:bg-muted/50 text-muted-foreground")}
+            >
+              <Package className="h-3.5 w-3.5 shrink-0" />
+              <span className="flex-1">Unassigned</span>
+              <Badge variant="secondary" className="text-[10px] font-mono">{unassignedItems.length}</Badge>
+            </button>
+
+            <div className="h-px bg-border my-1" />
+
+            {topCats.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">
+                <FolderPlus className="h-8 w-8 mx-auto mb-2 opacity-20" />
+                <p className="text-xs">No categories yet</p>
+                <p className="text-[10px] mt-1">Type a name above to create one</p>
+              </div>
+            ) : topCats.map(cat => {
+              const subCats = getSubCats(cat.id);
+              const itemCount = getItemsInCat(cat.id).length + subCats.reduce((s, sc) => s + getItemsInCat(sc.id).length, 0);
+              const isActive = selectedCatId === cat.id;
+              const isDragTarget = dragOverCat === cat.id && draggingItemId;
+              const isCatDragOver = dragOverCat === cat.id && draggingCatId;
+
+              return (
+                <div key={cat.id}>
+                  {/* Category Row */}
+                  <div
+                    draggable
+                    onDragStart={() => handleCatDragStart(cat.id)}
+                    onDragOver={e => handleCatDragOver(e, cat.id)}
+                    onDrop={() => draggingCatId ? handleCatDropReorder(cat.id) : handleCatDrop(cat.id)}
+                    onDragLeave={() => setDragOverCat(null)}
+                    className={
+                      "group flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-all " +
+                      (isActive ? "bg-primary/10 text-primary" : "hover:bg-muted/50") +
+                      (isDragTarget ? " ring-2 ring-primary bg-primary/5" : "") +
+                      (isCatDragOver ? " ring-2 ring-dashed ring-muted-foreground/40" : "")
+                    }
+                    onClick={() => setSelectedCatId(cat.id)}
+                  >
+                    <GripVertical className="h-3.5 w-3.5 text-muted-foreground/30 group-hover:text-muted-foreground/60 cursor-grab shrink-0" />
+                    <FolderOpen className={"h-3.5 w-3.5 shrink-0 " + (isActive ? "text-primary" : "text-muted-foreground")} />
+                    {renamingId === cat.id ? (
+                      <Input
+                        autoFocus
+                        value={renameVal}
+                        onChange={e => setRenameVal(e.target.value)}
+                        className="h-6 text-xs flex-1 px-1 border-primary"
+                        onKeyDown={e => {
+                          if (e.key === "Enter") { onRenameCategory(cat, renameVal); setRenamingId(null); }
+                          if (e.key === "Escape") setRenamingId(null);
+                        }}
+                        onBlur={() => setRenamingId(null)}
+                        onClick={e => e.stopPropagation()}
+                      />
+                    ) : (
+                      <span className={"flex-1 text-sm font-medium truncate " + (isActive ? "text-primary" : "")}>{cat.name}</span>
+                    )}
+                    <Badge variant="secondary" className="text-[10px] font-mono shrink-0">{itemCount}</Badge>
+                    <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0" onClick={e => e.stopPropagation()}>
+                      <button
+                        className="h-5 w-5 flex items-center justify-center rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                        onClick={() => { setSubCatInput(subCatInput === cat.id ? null : cat.id); setSubCatName(""); }}
+                        title="Add sub-category"
+                      >
+                        <Plus className="h-3 w-3" />
+                      </button>
+                      <button
+                        className="h-5 w-5 flex items-center justify-center rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                        onClick={() => { setRenamingId(cat.id); setRenameVal(cat.name); }}
+                        title="Rename"
+                      >
+                        <Pencil className="h-3 w-3" />
+                      </button>
+                      <button
+                        className="h-5 w-5 flex items-center justify-center rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
+                        onClick={() => onDeleteCategory(cat)}
+                        title="Delete"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Sub-category input */}
+                  {subCatInput === cat.id && (
+                    <div className="ml-6 mt-1 mb-1 flex items-center gap-1">
+                      <Input
+                        autoFocus
+                        value={subCatName}
+                        onChange={e => setSubCatName(e.target.value)}
+                        placeholder="Sub-category name..."
+                        className="h-7 text-xs flex-1"
+                        onKeyDown={async e => {
+                          if (e.key === "Enter" && subCatName.trim()) {
+                            await onAddSubCategory(cat.id, subCatName.trim());
+                            setSubCatInput(null);
+                            setSubCatName("");
+                          }
+                          if (e.key === "Escape") { setSubCatInput(null); setSubCatName(""); }
+                        }}
+                      />
+                      <Button size="sm" className="h-7 px-2 text-xs bg-gradient-amber" onClick={async () => {
+                        if (subCatName.trim()) {
+                          await onAddSubCategory(cat.id, subCatName.trim());
+                          setSubCatInput(null); setSubCatName("");
+                        }
+                      }}>Add</Button>
+                    </div>
+                  )}
+
+                  {/* Sub-categories */}
+                  {subCats.map(sub => {
+                    const subCount = getItemsInCat(sub.id).length;
+                    const isSubActive = selectedCatId === sub.id;
+                    const isSubDragTarget = dragOverCat === sub.id && draggingItemId;
+                    return (
+                      <div
+                        key={sub.id}
+                        onDragOver={e => { e.preventDefault(); setDragOverCat(sub.id); }}
+                        onDrop={() => handleCatDrop(sub.id)}
+                        onDragLeave={() => setDragOverCat(null)}
+                        onClick={() => setSelectedCatId(sub.id)}
+                        className={
+                          "group ml-6 flex items-center gap-2 px-3 py-1.5 rounded-lg cursor-pointer transition-all " +
+                          (isSubActive ? "bg-primary/10 text-primary" : "hover:bg-muted/50") +
+                          (isSubDragTarget ? " ring-2 ring-primary bg-primary/5" : "")
+                        }
+                      >
+                        <div className="w-3 h-px bg-border shrink-0" />
+                        <FolderOpen className={"h-3 w-3 shrink-0 " + (isSubActive ? "text-primary" : "text-muted-foreground/60")} />
+                        {renamingId === sub.id ? (
+                          <Input autoFocus value={renameVal} onChange={e => setRenameVal(e.target.value)}
+                            className="h-5 text-xs flex-1 px-1"
+                            onKeyDown={e => { if (e.key === "Enter") { onRenameCategory(sub, renameVal); setRenamingId(null); } if (e.key === "Escape") setRenamingId(null); }}
+                            onBlur={() => setRenamingId(null)} onClick={e => e.stopPropagation()} />
+                        ) : (
+                          <span className={"flex-1 text-xs truncate " + (isSubActive ? "font-medium text-primary" : "text-muted-foreground")}>{sub.name}</span>
+                        )}
+                        <Badge variant="secondary" className="text-[9px] font-mono shrink-0">{subCount}</Badge>
+                        <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity" onClick={e => e.stopPropagation()}>
+                          <button className="h-4 w-4 flex items-center justify-center rounded hover:bg-muted text-muted-foreground" onClick={() => { setRenamingId(sub.id); setRenameVal(sub.name); }}>
+                            <Pencil className="h-2.5 w-2.5" />
+                          </button>
+                          <button className="h-4 w-4 flex items-center justify-center rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive" onClick={() => onDeleteCategory(sub)}>
+                            <Trash2 className="h-2.5 w-2.5" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* RIGHT: Items Panel */}
+        <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex items-center justify-between px-6 py-3 border-b shrink-0">
+            <div className="flex items-center gap-2">
+              {selectedCatId
+                ? <FolderOpen className="h-4 w-4 text-primary" />
+                : <Package className="h-4 w-4 text-muted-foreground" />
+              }
+              <h2 className="text-sm font-bold">{rightPanelTitle}</h2>
+              <Badge variant="secondary" className="text-[10px] font-mono">{rightPanelItems.length} items</Badge>
+            </div>
+            {selectedCatId && (
+              <p className="text-xs text-muted-foreground">Drag items from here to a category on the left</p>
+            )}
+            {!selectedCatId && rightPanelItems.length > 0 && (
+              <p className="text-xs text-muted-foreground">Drag items to a category on the left to assign them</p>
+            )}
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4">
+            {rightPanelItems.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
+                <Check className="h-12 w-12 mb-3 text-success/30" />
+                <p className="text-sm font-medium">
+                  {selectedCatId ? "No items in this category" : "All items are assigned!"}
+                </p>
+                <p className="text-xs mt-1">
+                  {selectedCatId ? "Drag items here from the Unassigned view" : "Every item has been assigned to a category"}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {rightPanelItems.map(item => (
+                  <div
+                    key={item.id}
+                    draggable
+                    onDragStart={() => handleItemDragStart(item.id)}
+                    onDragEnd={handleItemDragEnd}
+                    className={
+                      "flex items-center gap-3 px-4 py-3 rounded-xl border bg-card hover:shadow-sm transition-all cursor-grab active:cursor-grabbing active:opacity-60 " +
+                      (draggingItemId === item.id ? "opacity-40 scale-95" : "")
+                    }
+                  >
+                    <GripVertical className="h-4 w-4 text-muted-foreground/30 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate">{item.item_name}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {[item.unit, item.pack_size, item.vendor_name].filter(Boolean).join(" · ") || "No details"}
+                      </p>
+                    </div>
+                    {item.default_unit_cost != null && (
+                      <span className="text-xs font-mono text-muted-foreground shrink-0">${Number(item.default_unit_cost).toFixed(2)}</span>
+                    )}
+                    {selectedCatId && (
+                      <button
+                        className="h-7 w-7 flex items-center justify-center rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors shrink-0"
+                        title="Remove from category"
+                        onClick={async () => {
+                          setSaving(true);
+                          await onAssignItem(item.id, null);
+                          setSaving(false);
+                        }}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom status bar */}
+      <div className="px-6 py-2.5 border-t bg-muted/20 flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-4 text-xs text-muted-foreground">
+          <span>{catalogItems.length} total items</span>
+          <span>·</span>
+          <span>{catalogItems.length - unassignedItems.length} assigned</span>
+          <span>·</span>
+          <span className={unassignedItems.length > 0 ? "text-warning font-medium" : "text-success font-medium"}>
+            {unassignedItems.length} unassigned
+          </span>
+        </div>
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <GripVertical className="h-3.5 w-3.5" />
+          <span>Drag categories to reorder · Drag items to assign</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ListManagementPage() {
   const { currentRestaurant, currentLocation } = useRestaurant();
   const { user } = useAuth();
@@ -238,6 +635,15 @@ export default function ListManagementPage() {
   // ── Inline edit
   const [editingItem, setEditingItem] = useState<string | null>(null);
   const [editValues, setEditValues] = useState<any>({});
+
+  // ── Edit sheet (three-dot menu)
+  const [editSheetItem, setEditSheetItem] = useState<CatalogItem | null>(null);
+  const [editSheetValues, setEditSheetValues] = useState<{ item_name: string; vendor_sku: string; default_unit_cost: number | null; unit: string; pack_size: string }>({ item_name: "", vendor_sku: "", default_unit_cost: null, unit: "", pack_size: "" });
+  const [editSheetSaving, setEditSheetSaving] = useState(false);
+
+  // ── Delete item confirm
+  const [deleteItemId, setDeleteItemId] = useState<string | null>(null);
+  const [deleteItemName, setDeleteItemName] = useState("");
 
   // ── Add item
   const [addItemOpen, setAddItemOpen] = useState(false);
@@ -1297,9 +1703,6 @@ export default function ListManagementPage() {
                 <DropdownMenuItem onClick={() => setReorderMode(!reorderMode)}>
                   <GripVertical className="h-3.5 w-3.5 mr-2" /> {reorderMode ? "Exit reorder mode" : "Reorder mode"}
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => setCategoryManagerOpen(true)}>
-                  <FolderPlus className="h-3.5 w-3.5 mr-2" /> Category manager
-                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger><Download className="h-3.5 w-3.5 mr-2" /> Export list</DropdownMenuSubTrigger>
@@ -1340,35 +1743,41 @@ export default function ListManagementPage() {
               </div>
 
               <div className="flex items-center gap-3 ml-auto">
-                {/* View Mode Menu */}
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="outline" size="sm" className="gap-2 h-10">
-                      <Menu className="h-3.5 w-3.5" />
-                      {viewModeLabel[viewMode]}
-                      <ChevronDown className="h-3 w-3 opacity-50" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start" className="w-56">
-                    <DropdownMenuItem onClick={() => { setViewMode("list-order"); updateActiveCategoryMode("list-order"); setSelectedItems(new Set()); }} className="gap-2">
-                      <LayoutList className="h-4 w-4" /> List Order
-                      {viewMode === "list-order" && <Check className="h-3.5 w-3.5 ml-auto" />}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => { setViewMode("custom-categories"); updateActiveCategoryMode("custom-categories"); setSelectedItems(new Set()); }} className="gap-2">
-                      <Sparkles className="h-4 w-4" /> Custom Categories
-                      {viewMode === "custom-categories" && <Check className="h-3.5 w-3.5 ml-auto" />}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => { setViewMode("my-categories"); updateActiveCategoryMode("my-categories"); setSelectedItems(new Set()); }} className="gap-2">
-                      <User className="h-4 w-4" /> My Categories
-                      {viewMode === "my-categories" && <Check className="h-3.5 w-3.5 ml-auto" />}
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={() => { setViewMode("recently-purchased"); updateActiveCategoryMode("recently-purchased"); setSelectedItems(new Set()); }} className="gap-2">
-                      <Clock className="h-4 w-4" /> Recently Purchased
-                      {viewMode === "recently-purchased" && <Check className="h-3.5 w-3.5 ml-auto" />}
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                {/* View Mode — visible tab buttons */}
+                <div className="flex items-center gap-1 bg-muted/40 border rounded-lg p-1">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className={`h-8 text-xs gap-1.5 ${viewMode === "list-order" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground"}`}
+                    onClick={() => { setViewMode("list-order"); updateActiveCategoryMode("list-order"); setSelectedItems(new Set()); }}
+                  >
+                    <LayoutList className="h-3.5 w-3.5" /> List Order
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className={`h-8 text-xs gap-1.5 ${viewMode === "my-categories" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground"}`}
+                    onClick={() => { setViewMode("my-categories"); updateActiveCategoryMode("my-categories"); setSelectedItems(new Set()); }}
+                  >
+                    <User className="h-3.5 w-3.5" /> My Categories
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className={`h-8 text-xs gap-1.5 ${viewMode === "custom-categories" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground"}`}
+                    onClick={() => { setViewMode("custom-categories"); updateActiveCategoryMode("custom-categories"); setSelectedItems(new Set()); }}
+                  >
+                    <Sparkles className="h-3.5 w-3.5" /> Auto
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className={`h-8 text-xs gap-1.5 ${viewMode === "recently-purchased" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground"}`}
+                    onClick={() => { setViewMode("recently-purchased"); updateActiveCategoryMode("recently-purchased"); setSelectedItems(new Set()); }}
+                  >
+                    <Clock className="h-3.5 w-3.5" /> Recent
+                  </Button>
+                </div>
 
                 <Dialog open={addItemOpen} onOpenChange={setAddItemOpen}>
                   <DialogTrigger asChild>
@@ -1445,22 +1854,51 @@ export default function ListManagementPage() {
               </div>
             )}
 
-            {/* My Categories: Create category input */}
+            {/* ── Stats Summary Strip ── */}
+            <div className="flex items-center gap-4 px-4 py-2.5 rounded-lg border bg-card flex-wrap">
+              <div className="flex items-center gap-1.5">
+                <span className="text-base font-bold font-mono text-foreground">{filteredItems.length}</span>
+                <span className="text-xs text-muted-foreground">items</span>
+              </div>
+              <div className="w-px h-5 bg-border" />
+              <div className="flex items-center gap-1.5">
+                <span className="text-base font-bold font-mono text-success">
+                  ${catalogItems.reduce((sum, i) => sum + (i.default_unit_cost || 0), 0).toFixed(2)}
+                </span>
+                <span className="text-xs text-muted-foreground">total value</span>
+              </div>
+              <div className="w-px h-5 bg-border" />
+              <div className="flex items-center gap-1.5">
+                <span className={`text-base font-bold font-mono ${issues.length > 0 ? "text-warning" : "text-success"}`}>{issues.length}</span>
+                <span className="text-xs text-muted-foreground">issues</span>
+              </div>
+              {issues.length > 0 && (
+                <>
+                  <div className="w-px h-5 bg-border" />
+                  <button
+                    className="flex items-center gap-1.5 text-xs font-semibold text-warning hover:underline"
+                    onClick={() => setActiveTab("issues")}
+                  >
+                    <AlertTriangle className="h-3.5 w-3.5" /> Fix {issues.length} issues →
+                  </button>
+                </>
+              )}
+            </div>
+
+            {/* My Categories: Open Category Builder */}
             {viewMode === "my-categories" && (
               <div className="flex items-center gap-3 p-3 rounded-lg border bg-muted/20">
                 <FolderPlus className="h-4 w-4 text-muted-foreground" />
-                <Input
-                  value={newListCategoryName}
-                  onChange={e => setNewListCategoryName(e.target.value)}
-                  placeholder="+ Create category..."
-                  className="h-8 text-sm flex-1 max-w-xs"
-                  onKeyDown={e => e.key === "Enter" && handleAddListCategory()}
-                />
-                <Button size="sm" variant="outline" className="h-8 text-xs gap-1" onClick={handleAddListCategory} disabled={!newListCategoryName.trim()}>
-                  <Plus className="h-3 w-3" /> Create
-                </Button>
-                <Button size="sm" variant="outline" className="h-8 text-xs gap-1.5" onClick={handleSaveMyCategories} disabled={saveStatus === "saving"}>
-                  <Check className="h-3 w-3" /> {saveStatus === "saving" ? "Saving..." : "Save"}
+                <div className="flex-1">
+                  <p className="text-xs font-medium text-foreground">
+                    {getCurrentCategories().length > 0
+                      ? `${getCurrentCategories().length} categories · ${itemCategoryMaps.filter(m => getCurrentCategories().some(c => c.id === m.category_id)).length} items assigned`
+                      : "No categories yet"}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">Create categories, sub-categories and assign items</p>
+                </div>
+                <Button size="sm" className="h-8 text-xs gap-1.5 bg-gradient-amber" onClick={() => setCategoryManagerOpen(true)}>
+                  <FolderPlus className="h-3.5 w-3.5" /> Manage Categories
                 </Button>
               </div>
             )}
@@ -1524,13 +1962,13 @@ export default function ListManagementPage() {
                               </TableHead>
                             )}
                             <TableHead className="w-8"></TableHead>
-                            <TableHead className="text-xs font-semibold">Item Name</TableHead>
-                            <TableHead className="text-xs font-semibold">Unit</TableHead>
-                            <TableHead className="text-xs font-semibold">Pack Size</TableHead>
-                            <TableHead className="text-xs font-semibold">Product #</TableHead>
-                            <TableHead className="text-xs font-semibold">Last Ordered</TableHead>
-                            <TableHead className="text-xs font-semibold text-right">Unit Cost</TableHead>
-                            <TableHead className="text-xs font-semibold w-24">Actions</TableHead>
+                            <TableHead className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground min-w-[220px]">Item</TableHead>
+                            <TableHead className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground w-20">Unit</TableHead>
+                            <TableHead className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground w-24">Pack</TableHead>
+                            <TableHead className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground w-28">SKU</TableHead>
+                            <TableHead className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground w-28">Last Order</TableHead>
+                            <TableHead className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground text-right w-24">Cost</TableHead>
+                            <TableHead className="w-28"></TableHead>
                           </TableRow>
                         </TableHeader>
                         <Droppable droppableId={catName}>
@@ -1552,7 +1990,7 @@ export default function ListManagementPage() {
                                           <TableCell><Input className="h-8 text-sm" value={editValues.unit || ""} onChange={e => setEditValues({ ...editValues, unit: e.target.value })} /></TableCell>
                                           <TableCell><Input className="h-8 text-sm" value={editValues.pack_size || ""} onChange={e => setEditValues({ ...editValues, pack_size: e.target.value })} /></TableCell>
                                           <TableCell><Input className="h-8 text-sm" value={editValues.vendor_sku || ""} onChange={e => setEditValues({ ...editValues, vendor_sku: e.target.value })} /></TableCell>
-                                          <TableCell><Input className="h-8 text-sm w-20" type="number" value={editValues.default_unit_cost || 0} onChange={e => setEditValues({ ...editValues, default_unit_cost: +e.target.value })} /></TableCell>
+                                          <TableCell><Input className="h-8 text-sm w-20" type="number" step="0.01" value={editValues.default_unit_cost ?? ""} onChange={e => setEditValues({ ...editValues, default_unit_cost: e.target.value === "" ? null : +e.target.value })} placeholder="Cost" /></TableCell>
                                           <TableCell>
                                             <div className="flex gap-1">
                                               <Button size="sm" variant="ghost" className="h-7 text-xs px-2" onClick={() => handleSaveEdit(item.id)}>Save</Button>
@@ -1575,36 +2013,89 @@ export default function ListManagementPage() {
                                               <GripVertical className="h-4 w-4 text-muted-foreground/20 group-hover/row:text-muted-foreground/60 transition-colors" />
                                             </div>
                                           </TableCell>
-                                          <TableCell className="text-sm font-medium text-foreground">
-                                            <div>
-                                              <span>{item.item_name}</span>
-                                              <ItemIdentityBlock
-                                                brandName={item.brand_name}
-                                                className="block mt-0.5"
-                                              />
+                                          {/* ── Item Name + brand + badge ── */}
+                                          <TableCell className="text-sm font-medium text-foreground min-w-[220px]">
+                                            <div className="flex flex-col gap-0.5">
+                                              <span className="font-semibold text-foreground leading-snug">{item.item_name}</span>
+                                              <div className="flex items-center gap-2 flex-wrap">
+                                                {item.brand_name && (
+                                                  <span className="text-[11px] text-muted-foreground italic">{item.brand_name}</span>
+                                                )}
+                                                {(!item.pack_size || !item.vendor_sku || item.default_unit_cost == null) ? (
+                                                  <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-warning/10 text-warning border border-warning/20 uppercase tracking-wide">
+                                                    ⚠ missing fields
+                                                  </span>
+                                                ) : (
+                                                  <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-success/10 text-success border border-success/20 uppercase tracking-wide">
+                                                    ✓ complete
+                                                  </span>
+                                                )}
+                                              </div>
                                             </div>
                                           </TableCell>
-                                          <TableCell className="text-xs text-muted-foreground">{item.unit || <span className="text-destructive/60">—</span>}</TableCell>
-                                          <TableCell className="text-xs text-muted-foreground">{item.pack_size || <span className="text-destructive/60">—</span>}</TableCell>
-                                          <TableCell className="text-xs font-mono text-muted-foreground/60">{item.vendor_sku || "—"}</TableCell>
-                                          <TableCell className="text-xs text-muted-foreground">
+                                          {/* ── Unit pill ── */}
+                                          <TableCell className="w-20">
+                                            {item.unit
+                                              ? <span className="inline-flex items-center justify-center text-[10px] font-bold px-2 py-1 rounded-full bg-muted border border-border font-mono">{item.unit}</span>
+                                              : <span className="text-destructive/40 text-xs">—</span>
+                                            }
+                                          </TableCell>
+                                          {/* ── Pack Size ── */}
+                                          <TableCell className="text-xs text-muted-foreground w-24 font-mono">
+                                            {item.pack_size || (
+                                              <button
+                                                className="text-[10px] font-semibold text-primary/70 hover:text-primary bg-primary/5 hover:bg-primary/10 px-1.5 py-0.5 rounded transition-colors border border-primary/20"
+                                                onClick={() => { setEditingItem(item.id); setEditValues({ item_name: item.item_name, category: item.category, unit: item.unit, pack_size: item.pack_size, vendor_sku: item.vendor_sku, default_unit_cost: item.default_unit_cost, default_par_level: item.default_par_level }); }}
+                                              >+ add</button>
+                                            )}
+                                          </TableCell>
+                                          {/* ── SKU ── */}
+                                          <TableCell className="text-xs font-mono text-muted-foreground w-28">
+                                            {item.vendor_sku || (
+                                              <button
+                                                className="text-[10px] font-semibold text-primary/70 hover:text-primary bg-primary/5 hover:bg-primary/10 px-1.5 py-0.5 rounded transition-colors border border-primary/20"
+                                                onClick={() => { setEditingItem(item.id); setEditValues({ item_name: item.item_name, category: item.category, unit: item.unit, pack_size: item.pack_size, vendor_sku: item.vendor_sku, default_unit_cost: item.default_unit_cost, default_par_level: item.default_par_level }); }}
+                                              >+ add</button>
+                                            )}
+                                          </TableCell>
+                                          {/* ── Last Ordered ── */}
+                                          <TableCell className="text-xs text-muted-foreground w-28">
                                             {lastOrderDates[item.id]
                                               ? new Date(lastOrderDates[item.id]).toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "2-digit" })
-                                              : "—"}
+                                              : <span className="text-muted-foreground/40">—</span>}
                                           </TableCell>
-                                          <TableCell className="text-sm font-mono tabular-nums text-right">{item.default_unit_cost != null ? `$${Number(item.default_unit_cost).toFixed(2)}` : "—"}</TableCell>
-                                          <TableCell>
-                                            <div className="flex gap-1 opacity-0 group-hover/row:opacity-100 transition-opacity">
-                                              <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => { setEditingItem(item.id); setEditValues({ item_name: item.item_name, category: item.category, unit: item.unit, pack_size: item.pack_size, vendor_sku: item.vendor_sku, default_unit_cost: item.default_unit_cost }); }}>
-                                                <Pencil className="h-3.5 w-3.5" />
-                                              </Button>
-                                              <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => handleDuplicateItem(item)}>
-                                                <Copy className="h-3.5 w-3.5" />
-                                              </Button>
-                                              <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-destructive hover:text-destructive" onClick={() => handleDeleteItem(item.id)}>
-                                                <Trash2 className="h-3.5 w-3.5" />
-                                              </Button>
-                                            </div>
+                                          {/* ── Unit Cost ── */}
+                                          <TableCell className="w-24 text-right">
+                                            {item.default_unit_cost != null
+                                              ? <span className={`text-sm font-bold font-mono tabular-nums ${item.default_unit_cost > 80 ? "text-success" : "text-foreground"}`}>
+                                                  ${Number(item.default_unit_cost).toFixed(2)}
+                                                </span>
+                                              : <button
+                                                  className="text-[10px] font-semibold text-warning hover:text-warning/80 bg-warning/10 hover:bg-warning/15 px-1.5 py-0.5 rounded transition-colors border border-warning/20"
+                                                  onClick={() => { setEditingItem(item.id); setEditValues({ item_name: item.item_name, category: item.category, unit: item.unit, pack_size: item.pack_size, vendor_sku: item.vendor_sku, default_unit_cost: item.default_unit_cost, default_par_level: item.default_par_level }); }}
+                                                >+ add cost</button>
+                                            }
+                                          </TableCell>
+                                          <TableCell className="w-10" onClick={e => e.stopPropagation()}>
+                                            <DropdownMenu>
+                                              <DropdownMenuTrigger asChild onClick={e => e.stopPropagation()}>
+                                                <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground">
+                                                  <MoreVertical className="h-4 w-4" />
+                                                </Button>
+                                              </DropdownMenuTrigger>
+                                              <DropdownMenuContent align="end">
+                                                <DropdownMenuItem onClick={e => { e.stopPropagation(); const snap = item; setTimeout(() => { setEditSheetItem(snap); setEditSheetValues({ item_name: snap.item_name, vendor_sku: snap.vendor_sku || "", default_unit_cost: snap.default_unit_cost, unit: snap.unit || "", pack_size: snap.pack_size || "" }); }, 0); }}>
+                                                  <Pencil className="h-4 w-4 mr-2" /> Edit Item
+                                                </DropdownMenuItem>
+                                                <DropdownMenuItem onClick={e => { e.stopPropagation(); handleDuplicateItem(item); }}>
+                                                  <Copy className="h-4 w-4 mr-2" /> Duplicate Item
+                                                </DropdownMenuItem>
+                                                <DropdownMenuSeparator />
+                                                <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={e => { e.stopPropagation(); const id = item.id; const name = item.item_name; setTimeout(() => { setDeleteItemId(id); setDeleteItemName(name); }, 0); }}>
+                                                  <Trash2 className="h-4 w-4 mr-2" /> Delete Item
+                                                </DropdownMenuItem>
+                                              </DropdownMenuContent>
+                                            </DropdownMenu>
                                           </TableCell>
                                         </>
                                       )}
@@ -1624,6 +2115,31 @@ export default function ListManagementPage() {
                 </div>
               )}
             </DragDropContext>
+            {/* ── Summary bar at bottom ── */}
+            <div className="flex items-center justify-between px-4 py-2.5 rounded-lg border bg-muted/20 text-xs text-muted-foreground">
+              <div className="flex items-center gap-4">
+                <span className="font-medium text-foreground">{filteredItems.length} items</span>
+                {detailSearch && <span>filtered from {catalogItems.length} total</span>}
+                {issues.length > 0 && (
+                  <button
+                    className="flex items-center gap-1.5 text-warning font-semibold hover:underline"
+                    onClick={() => setActiveTab("issues")}
+                  >
+                    ⚠ {issues.length} items need attention
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-3">
+                {catalogItems.filter(i => i.default_unit_cost != null).length > 0 && (
+                  <span>
+                    Total value: <span className="font-semibold text-foreground font-mono">
+                      ${catalogItems.reduce((sum, i) => sum + (i.default_unit_cost || 0), 0).toFixed(2)}
+                    </span>
+                  </span>
+                )}
+                <span>{catalogItems.filter(i => !i.pack_size || !i.vendor_sku).length} missing fields</span>
+              </div>
+            </div>
           </TabsContent>
 
           {/* ── ISSUES TAB ── */}
@@ -1645,6 +2161,8 @@ export default function ListManagementPage() {
                       <TableHead className="text-xs font-semibold">Vendor</TableHead>
                       <TableHead className="text-xs font-semibold">Unit</TableHead>
                       <TableHead className="text-xs font-semibold">Pack Size</TableHead>
+                      <TableHead className="text-xs font-semibold">Cost</TableHead>
+                      <TableHead className="text-xs font-semibold">PAR</TableHead>
                       <TableHead className="text-xs font-semibold w-20">Action</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -1652,7 +2170,7 @@ export default function ListManagementPage() {
                     {issues.map(item => (
                       <IssueRow key={item.id} item={item} onFix={(item) => {
                         setEditingItem(item.id);
-                        setEditValues({ item_name: item.item_name, category: item.category, unit: item.unit, pack_size: item.pack_size, vendor_sku: item.vendor_sku, vendor_name: item.vendor_name, default_unit_cost: item.default_unit_cost });
+                        setEditValues({ item_name: item.item_name, category: item.category, unit: item.unit, pack_size: item.pack_size, vendor_sku: item.vendor_sku, vendor_name: item.vendor_name, default_unit_cost: item.default_unit_cost, default_par_level: item.default_par_level });
                         setActiveTab("items");
                       }} onQuickSave={async (id, updates) => {
                         const { error } = await supabase.from("inventory_catalog_items").update(updates).eq("id", id);
@@ -1668,47 +2186,63 @@ export default function ListManagementPage() {
 
         </Tabs>
 
-        {/* Category Manager Dialog */}
-        <Dialog open={categoryManagerOpen} onOpenChange={setCategoryManagerOpen}>
-          <DialogContent className="max-w-md">
-            <DialogHeader><DialogTitle>Category Manager — {selectedList.name}</DialogTitle></DialogHeader>
-            <div className="space-y-4">
-              <div className="flex gap-2">
-                <Input value={newListCategoryName} onChange={e => setNewListCategoryName(e.target.value)} placeholder="New category name..." className="h-9" onKeyDown={e => e.key === "Enter" && handleAddListCategory()} />
-                <Button size="sm" onClick={handleAddListCategory} disabled={!newListCategoryName.trim()} className="bg-gradient-amber gap-1"><Plus className="h-3.5 w-3.5" /> Add</Button>
-              </div>
-              {currentCats.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-4">No categories for this mode. Add one above.</p>
-              ) : (
-                <div className="space-y-2 max-h-60 overflow-auto">
-                  {currentCats.map(cat => {
-                    const currentMaps = getCurrentMappings();
-                    const count = currentMaps.filter(m => m.category_id === cat.id).length;
-                    return (
-                      <div key={cat.id} className="flex items-center justify-between p-2 rounded-md border bg-muted/20">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">{cat.name}</span>
-                          <Badge variant="secondary" className="text-[10px]">{count} items</Badge>
-                        </div>
-                        <div className="flex gap-1">
-                          <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => {
-                            const newName = prompt("Rename category:", cat.name);
-                            if (newName && newName !== cat.name) handleRenameCategory(cat, newName);
-                          }}>
-                            <Pencil className="h-3 w-3" />
-                          </Button>
-                          <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-destructive hover:text-destructive" onClick={() => handleDeleteCategory(cat)}>
-                            <Trash2 className="h-3 w-3" />
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </DialogContent>
-        </Dialog>
+        {/* ═══════════════════════════════════════════
+            CREATE CATEGORIES — Full Screen Overlay
+            ═══════════════════════════════════════════ */}
+        {categoryManagerOpen && (
+          <CategoryBuilderOverlay
+            listName={selectedList.name}
+            catalogItems={catalogItems}
+            currentCats={currentCats}
+            getCurrentMappings={getCurrentMappings}
+            onClose={() => setCategoryManagerOpen(false)}
+            onAddCategory={handleAddListCategory}
+            newListCategoryName={newListCategoryName}
+            setNewListCategoryName={setNewListCategoryName}
+            onRenameCategory={handleRenameCategory}
+            onDeleteCategory={handleDeleteCategory}
+            onAssignItem={async (itemId: string, categoryId: string | null) => {
+              if (!selectedList) return;
+              const setType = viewMode === "custom-categories" ? "custom_ai" : "user_manual";
+              const set = await getOrCreateCategorySet(selectedList.id, setType);
+              await supabase.from("list_item_category_map").upsert({
+                list_id: selectedList.id,
+                category_set_id: set.id,
+                catalog_item_id: itemId,
+                category_id: categoryId,
+                item_sort_order: 0,
+              }, { onConflict: "category_set_id,catalog_item_id" });
+              const { data: refreshedMaps } = await supabase.from("list_item_category_map").select("*").eq("list_id", selectedList.id);
+              if (refreshedMaps) setItemCategoryMaps(refreshedMaps as ItemCategoryMap[]);
+            }}
+            onReorderCategories={async (reordered: ListCategory[]) => {
+              setListCategories(prev => {
+                const others = prev.filter(c => !reordered.find(r => r.id === c.id));
+                return [...others, ...reordered];
+              });
+              await Promise.all(reordered.map((cat, i) =>
+                supabase.from("list_categories").update({ sort_order: i }).eq("id", cat.id)
+              ));
+            }}
+            onAddSubCategory={async (parentId: string, name: string) => {
+              if (!selectedList) return;
+              const setType = viewMode === "custom-categories" ? "custom_ai" : "user_manual";
+              const set = await getOrCreateCategorySet(selectedList.id, setType);
+              const { data, error } = await supabase.from("list_categories").insert({
+                list_id: selectedList.id,
+                name,
+                sort_order: 0,
+                category_set_id: set.id,
+                parent_category_id: parentId,
+              }).select().single();
+              if (error) toast.error(error.message);
+              else {
+                toast.success(`Sub-category "${name}" created`);
+                if (data) setListCategories(prev => [...prev, data as ListCategory]);
+              }
+            }}
+          />
+        )}
 
         {/* Rename Dialog */}
         <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
@@ -1737,6 +2271,118 @@ export default function ListManagementPage() {
 
         {/* Import Dialog (shared) */}
         {renderImportDialog()}
+
+        {/* ── Edit Item Sheet ── */}
+        <Sheet open={!!editSheetItem} onOpenChange={(o) => { if (!o) setEditSheetItem(null); }}>
+          <SheetContent side="right" className="w-full sm:max-w-md flex flex-col">
+            <SheetHeader>
+              <SheetTitle>Edit Item</SheetTitle>
+            </SheetHeader>
+            <div className="flex-1 overflow-y-auto py-4 space-y-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="sheet-item-name">Item Name</Label>
+                <Input
+                  id="sheet-item-name"
+                  value={editSheetValues.item_name}
+                  onChange={e => setEditSheetValues(v => ({ ...v, item_name: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="sheet-sku">SKU / Item Number</Label>
+                <Input
+                  id="sheet-sku"
+                  value={editSheetValues.vendor_sku}
+                  onChange={e => setEditSheetValues(v => ({ ...v, vendor_sku: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="sheet-cost">Cost / Price</Label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">$</span>
+                  <Input
+                    id="sheet-cost"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    className="pl-7"
+                    value={editSheetValues.default_unit_cost ?? ""}
+                    onChange={e => setEditSheetValues(v => ({ ...v, default_unit_cost: e.target.value === "" ? null : +e.target.value }))}
+                  />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="sheet-unit">Unit</Label>
+                <Input
+                  id="sheet-unit"
+                  value={editSheetValues.unit}
+                  onChange={e => setEditSheetValues(v => ({ ...v, unit: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="sheet-pack">Pack Size</Label>
+                <Input
+                  id="sheet-pack"
+                  value={editSheetValues.pack_size}
+                  onChange={e => setEditSheetValues(v => ({ ...v, pack_size: e.target.value }))}
+                />
+              </div>
+            </div>
+            <SheetFooter className="flex flex-col gap-2 pt-2">
+              <Button
+                className="w-full bg-orange-500 hover:bg-orange-600 text-white"
+                disabled={editSheetSaving}
+                onClick={async () => {
+                  if (!editSheetItem) return;
+                  setEditSheetSaving(true);
+                  const { error } = await supabase.from("inventory_catalog_items").update({
+                    item_name: editSheetValues.item_name,
+                    vendor_sku: editSheetValues.vendor_sku || null,
+                    default_unit_cost: editSheetValues.default_unit_cost,
+                    unit: editSheetValues.unit || null,
+                    pack_size: editSheetValues.pack_size || null,
+                  }).eq("id", editSheetItem.id);
+                  setEditSheetSaving(false);
+                  if (error) { toast.error(error.message); return; }
+                  toast.success("✅ Item saved");
+                  setEditSheetItem(null);
+                  openListDetail(selectedList);
+                }}
+              >
+                {editSheetSaving ? "Saving…" : "Save Changes"}
+              </Button>
+              <Button variant="outline" className="w-full" onClick={() => setEditSheetItem(null)}>
+                Cancel
+              </Button>
+            </SheetFooter>
+          </SheetContent>
+        </Sheet>
+
+        {/* ── Delete Item Confirm ── */}
+        <AlertDialog open={!!deleteItemId} onOpenChange={(o) => { if (!o) setDeleteItemId(null); }}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete {deleteItemName}?</AlertDialogTitle>
+              <AlertDialogDescription>This cannot be undone.</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                onClick={async () => {
+                  if (!deleteItemId) return;
+                  await supabase.from("list_item_category_map").delete().eq("catalog_item_id", deleteItemId);
+                  const { error } = await supabase.from("inventory_catalog_items").delete().eq("id", deleteItemId);
+                  if (error) { toast.error(error.message); return; }
+                  toast.success("Item deleted");
+                  setDeleteItemId(null);
+                  openListDetail(selectedList);
+                }}
+              >
+                Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     );
   }

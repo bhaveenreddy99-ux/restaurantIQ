@@ -4,37 +4,56 @@ import { useRestaurant } from "@/contexts/RestaurantContext";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
-  Package, AlertTriangle, TrendingUp, TrendingDown, ShoppingCart, ArrowUpRight,
-  Building2, Bell, DollarSign, BarChart3, Sparkles, ChevronDown,
-  ClipboardCheck, Clock, CheckCircle2, AlertCircle, Zap, ArrowRight,
-  Shield, Users, CalendarDays, FileText, Activity, Receipt
+  Package, AlertTriangle, TrendingUp, TrendingDown, ShoppingCart,
+  Building2, Bell, DollarSign, BarChart3, Sparkles,
+  ClipboardCheck, Clock, CheckCircle2, Zap, ArrowRight,
+  CalendarDays, Activity, Receipt, Trash2
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import ParAlertsBanner from "@/components/ParAlertsBanner";
-import { format } from "date-fns";
+import { format, differenceInDays, startOfDay } from "date-fns";
 import { getRisk, computeOrderQty } from "@/lib/inventory-utils";
 import { computeUsageAnalytics, computePARRecommendations, type ComputedUsageItem, type PARRecommendation } from "@/lib/usage-analytics";
-import { DemoRoleSwitcher, useDemoRole } from "@/components/DemoRoleSwitcher";
 
-// ─── Command Bar ───
-function CommandBar({
+// ─── Today's Briefing ───
+function TodaysBriefing({
   timeFilter,
   setTimeFilter,
   onStartInventory,
+  stockStatus,
+  pendingInvoices,
+  daysSinceLastCount,
 }: {
   timeFilter: string;
   setTimeFilter: (v: string) => void;
   onStartInventory: () => void;
+  stockStatus: { red: number; yellow: number; green: number };
+  pendingInvoices: number;
+  daysSinceLastCount: number | null;
 }) {
+  const briefing =
+    stockStatus.red > 0
+      ? `⚠️ You have ${stockStatus.red} critical item${stockStatus.red !== 1 ? "s" : ""}. Order today before you run out.`
+      : pendingInvoices > 0
+      ? `📋 ${pendingInvoices} invoice${pendingInvoices !== 1 ? "s" : ""} waiting to be received.`
+      : daysSinceLastCount !== null
+      ? `✅ Everything looks good. Last count was ${daysSinceLastCount} day${daysSinceLastCount !== 1 ? "s" : ""} ago.`
+      : `✅ Everything looks good. Complete your first inventory count to unlock insights.`;
+
   return (
-    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl bg-card border border-border/60 shadow-sm">
-      <div className="flex items-center gap-3">
+    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/30 dark:to-orange-950/30 border border-amber-200/60 dark:border-amber-800/40 shadow-sm">
+      <div>
+        <p className="text-[11px] text-amber-600/70 dark:text-amber-400/60 font-medium">
+          {format(new Date(), "EEEE, MMM d")}
+        </p>
+        <p className="text-sm font-semibold text-foreground mt-0.5">{briefing}</p>
+      </div>
+      <div className="flex items-center gap-3 shrink-0">
         <Select value={timeFilter} onValueChange={setTimeFilter}>
-          <SelectTrigger className="w-[160px] h-9 text-xs font-medium bg-background">
+          <SelectTrigger className="w-[150px] h-9 text-xs font-medium bg-background">
             <CalendarDays className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
             <SelectValue />
           </SelectTrigger>
@@ -44,14 +63,14 @@ function CommandBar({
             <SelectItem value="30_days">Last 30 Days</SelectItem>
           </SelectContent>
         </Select>
+        <Button
+          onClick={onStartInventory}
+          className="bg-gradient-orange text-white shadow-orange hover:opacity-90 transition-opacity h-9 px-5 text-xs font-semibold"
+        >
+          <ClipboardCheck className="h-3.5 w-3.5 mr-1.5" />
+          Start Inventory
+        </Button>
       </div>
-      <Button
-        onClick={onStartInventory}
-        className="bg-gradient-orange text-white shadow-orange hover:opacity-90 transition-opacity h-9 px-5 text-xs font-semibold"
-      >
-        <ClipboardCheck className="h-3.5 w-3.5 mr-1.5" />
-        Start Inventory
-      </Button>
     </div>
   );
 }
@@ -73,26 +92,10 @@ function KpiCard({
   accent: "destructive" | "warning" | "success" | "primary";
 }) {
   const accentMap = {
-    destructive: {
-      bg: "bg-destructive/8",
-      text: "text-destructive",
-      border: "border-destructive/10",
-    },
-    warning: {
-      bg: "bg-warning/8",
-      text: "text-warning",
-      border: "border-warning/10",
-    },
-    success: {
-      bg: "bg-success/8",
-      text: "text-success",
-      border: "border-success/10",
-    },
-    primary: {
-      bg: "bg-primary/8",
-      text: "text-primary",
-      border: "border-primary/10",
-    },
+    destructive: { bg: "bg-destructive/8", text: "text-destructive", border: "border-destructive/10" },
+    warning: { bg: "bg-warning/8", text: "text-warning", border: "border-warning/10" },
+    success: { bg: "bg-success/8", text: "text-success", border: "border-success/10" },
+    primary: { bg: "bg-primary/8", text: "text-primary", border: "border-primary/10" },
   };
   const a = accentMap[accent];
 
@@ -126,10 +129,16 @@ function KpiCard({
 function ActionCenter({
   criticalCount,
   pendingApprovals,
+  daysSinceLastCount,
+  recommendationsCount,
+  todayWasteCount,
   navigate,
 }: {
   criticalCount: number;
   pendingApprovals: number;
+  daysSinceLastCount: number | null;
+  recommendationsCount: number;
+  todayWasteCount: number;
   navigate: (path: string) => void;
 }) {
   const items = [
@@ -148,6 +157,30 @@ function ActionCenter({
       bg: "bg-primary/6",
       path: "/app/invoices",
       show: pendingApprovals > 0,
+    },
+    {
+      icon: CalendarDays,
+      label: "No count in 7+ days — time to count",
+      color: "text-warning",
+      bg: "bg-warning/6",
+      path: "/app/inventory/enter",
+      show: daysSinceLastCount !== null && daysSinceLastCount >= 7,
+    },
+    {
+      icon: TrendingUp,
+      label: `${recommendationsCount} PAR adjustment${recommendationsCount !== 1 ? "s" : ""} suggested`,
+      color: "text-primary",
+      bg: "bg-primary/6",
+      path: "/app/par/suggestions",
+      show: recommendationsCount > 0,
+    },
+    {
+      icon: Trash2,
+      label: "No waste logged today — remind staff",
+      color: "text-muted-foreground",
+      bg: "bg-muted/30",
+      path: "/app/waste-log",
+      show: daysSinceLastCount !== null && daysSinceLastCount <= 1 && todayWasteCount === 0,
     },
   ].filter((i) => i.show);
 
@@ -192,9 +225,15 @@ function ActionCenter({
 // ─── Smart Order Preview ───
 function SmartOrderPreview({
   topReorder,
+  redCount,
+  yellowCount,
+  reorderValue,
   navigate,
 }: {
   topReorder: any[];
+  redCount: number;
+  yellowCount: number;
+  reorderValue: number;
   navigate: (path: string) => void;
 }) {
   const riskBadge = (ratio: number) => {
@@ -203,24 +242,46 @@ function SmartOrderPreview({
     return <Badge className="bg-success text-success-foreground text-[10px] font-medium w-12 justify-center">OK</Badge>;
   };
 
+  const hasItems = topReorder.length > 0;
+
   return (
     <Card className="hover:shadow-md transition-all duration-200">
       <div className="flex items-center justify-between p-5 pb-3">
-        <div className="flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-primary" />
-          <h3 className="text-sm font-bold tracking-tight">AI Smart Order Suggestions</h3>
+        <div className="flex-1 min-w-0">
+          {hasItems ? (
+            <div className="flex items-center gap-3 flex-wrap">
+              <div>
+                <p className="text-sm font-bold tracking-tight">
+                  Order Needed:
+                  {redCount > 0 && <span className="text-destructive ml-1">{redCount} Critical</span>}
+                  {redCount > 0 && yellowCount > 0 && <span className="text-muted-foreground">, </span>}
+                  {yellowCount > 0 && <span className="text-warning">{yellowCount} Low</span>}
+                </p>
+                {reorderValue > 0 && (
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    Est. reorder value: <span className="font-semibold text-foreground font-mono">${reorderValue.toFixed(0)}</span>
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-primary shrink-0" />
+              <h3 className="text-sm font-bold tracking-tight">Smart Order Suggestions</h3>
+            </div>
+          )}
         </div>
-        {topReorder.length > 0 && (
+        {hasItems && (
           <Button
             onClick={() => navigate("/app/smart-order")}
-            className="bg-gradient-orange text-white shadow-orange hover:opacity-90 h-8 px-4 text-xs font-semibold"
+            className="bg-gradient-orange text-white shadow-orange hover:opacity-90 h-8 px-4 text-xs font-semibold shrink-0 ml-3"
           >
             Generate Smart Order
           </Button>
         )}
       </div>
       <CardContent className="pt-0 pb-4 px-5">
-        {topReorder.length === 0 ? (
+        {!hasItems ? (
           <div className="flex flex-col items-center py-10 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/6 mb-4">
               <Sparkles className="h-7 w-7 text-primary/40" />
@@ -269,19 +330,91 @@ function SmartOrderPreview({
   );
 }
 
+// ─── Today's Waste Snapshot ───
+function WasteSnapshot({ entries, navigate }: { entries: any[]; navigate: (p: string) => void }) {
+  const totalQty = entries.reduce((sum, e) => sum + Number(e.quantity), 0);
+  const lastThree = entries.slice(0, 3);
+
+  return (
+    <Card className="hover:shadow-md transition-all duration-200">
+      <div className="flex items-center justify-between p-5 pb-3">
+        <div className="flex items-center gap-2">
+          <Trash2 className="h-4 w-4 text-warning" />
+          <h3 className="text-sm font-bold tracking-tight">Today's Waste Log</h3>
+          {entries.length > 0 && (
+            <Badge variant="secondary" className="text-[10px] h-5 ml-1">{entries.length} entries</Badge>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {entries.length > 0 && (
+            <Button variant="outline" size="sm" className="h-7 text-[10px]" onClick={() => navigate("/app/waste-log")}>
+              View Full Log →
+            </Button>
+          )}
+          <Button size="sm" className="h-7 text-[10px] bg-gradient-amber shadow-amber text-white" onClick={() => navigate("/app/waste-log")}>
+            + Log Waste
+          </Button>
+        </div>
+      </div>
+      <CardContent className="pt-0 pb-4 px-5">
+        {entries.length === 0 ? (
+          <div className="flex items-center gap-2 py-4">
+            <CheckCircle2 className="h-5 w-5 text-success shrink-0" />
+            <p className="text-sm text-success font-medium">No waste logged today</p>
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              <div className="rounded-lg bg-muted/30 p-3">
+                <p className="text-[11px] text-muted-foreground mb-1">Entries Today</p>
+                <p className="text-lg font-bold tabular-nums">{entries.length}</p>
+              </div>
+              <div className="rounded-lg bg-muted/30 p-3">
+                <p className="text-[11px] text-muted-foreground mb-1">Total Qty Wasted</p>
+                <p className="text-lg font-bold tabular-nums text-warning">
+                  {totalQty % 1 === 0 ? totalQty : totalQty.toFixed(1)}
+                </p>
+              </div>
+            </div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-2">Recent Entries</p>
+            <div className="space-y-0.5">
+              {lastThree.map((entry, i) => (
+                <div key={i} className="flex items-center gap-2 py-1.5 px-2 rounded hover:bg-muted/30 transition-colors">
+                  <span className="text-[10px] text-muted-foreground font-mono shrink-0 w-14">
+                    {format(new Date(entry.logged_at), "h:mm a")}
+                  </span>
+                  <span className="text-sm font-medium flex-1 truncate">{entry.item_name}</span>
+                  <span className="text-xs font-mono text-muted-foreground shrink-0">×{entry.quantity}</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground shrink-0">
+                    {(entry.reason as string).replace(/_/g, " ")}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ─── Usage & Trend Analytics ───
 function AnalyticsSection({ highUsage, trendData }: { highUsage: ComputedUsageItem[]; trendData: { label: string; value: number }[] }) {
   const maxTrendValue = Math.max(...trendData.map(d => d.value), 1);
+  const maxUsage = Math.max(...highUsage.map(i => i.weekly_usage), 1);
 
   return (
     <div className="grid gap-5 lg:grid-cols-2">
       {/* High Usage Items */}
       <Card className="hover:shadow-md transition-all duration-200">
-        <div className="flex items-center gap-2 p-5 pb-3">
+        <div className="flex items-center gap-2 p-5 pb-1">
           <TrendingUp className="h-4 w-4 text-primary" />
           <h3 className="text-sm font-bold tracking-tight">High Usage Items</h3>
           <Badge variant="secondary" className="text-[10px] h-5 ml-1">Computed</Badge>
         </div>
+        <p className="text-[11px] text-muted-foreground px-5 pb-3">
+          Usage computed between your last 2 approved counts
+        </p>
         <CardContent className="pt-0 pb-4 px-5">
           {highUsage.length === 0 ? (
             <div className="flex flex-col items-center py-8 text-center">
@@ -291,25 +424,30 @@ function AnalyticsSection({ highUsage, trendData }: { highUsage: ComputedUsageIt
             </div>
           ) : (
             <div className="space-y-0.5">
-              {highUsage.slice(0, 8).map((item, i) => (
-                <div key={i} className="flex items-center justify-between py-2.5 px-3 rounded-lg hover:bg-muted/30 transition-colors">
-                  <div className="flex items-center gap-3">
-                    <span className="text-[11px] font-mono text-muted-foreground/50 w-4">{i + 1}</span>
-                    <span className="text-sm font-medium">{item.item_name}</span>
+              {highUsage.slice(0, 8).map((item, i) => {
+                const pct = Math.min((item.weekly_usage / maxUsage) * 100, 100);
+                const barColor = pct > 90 ? "bg-destructive/60" : pct > 70 ? "bg-warning/60" : "bg-success/50";
+                return (
+                  <div key={i} className="py-2.5 px-3 rounded-lg hover:bg-muted/30 transition-colors">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <div className="flex items-center gap-3">
+                        <span className="text-[11px] font-mono text-muted-foreground/50 w-4">{i + 1}</span>
+                        <span className="text-sm font-medium">{item.item_name}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-mono font-semibold">{item.weekly_usage.toFixed(1)}</span>
+                        <span className="text-[10px] text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded">/wk</span>
+                      </div>
+                    </div>
+                    <div className="h-1 w-full rounded-full bg-muted/40 ml-7">
+                      <div
+                        className={`h-full rounded-full transition-all ${barColor}`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-mono font-semibold">{item.weekly_usage.toFixed(1)}</span>
-                    <span className="text-[10px] text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded">
-                      /wk
-                    </span>
-                    {item.usage_raw > 0 ? (
-                      <TrendingUp className="h-3 w-3 text-success/60" />
-                    ) : (
-                      <TrendingDown className="h-3 w-3 text-warning/60" />
-                    )}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardContent>
@@ -666,7 +804,6 @@ function PortfolioDashboard({ setCurrentRestaurant }: { setCurrentRestaurant: (r
   const totals = data?.totals || { red: 0, yellow: 0, green: 0 };
   const restaurants = data?.restaurants || [];
   const totalItems = totals.red + totals.yellow + totals.green;
-  const totalOrders = restaurants.reduce((s: number, r: any) => s + (r.recentOrders || 0), 0);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -677,10 +814,13 @@ function PortfolioDashboard({ setCurrentRestaurant }: { setCurrentRestaurant: (r
         </div>
       </div>
 
-      <CommandBar
+      <TodaysBriefing
         timeFilter={timeFilter}
         setTimeFilter={setTimeFilter}
         onStartInventory={() => navigate("/app/inventory/enter")}
+        stockStatus={totals}
+        pendingInvoices={0}
+        daysSinceLastCount={null}
       />
 
       {/* KPI Cards */}
@@ -702,6 +842,9 @@ function PortfolioDashboard({ setCurrentRestaurant }: { setCurrentRestaurant: (r
         <ActionCenter
           criticalCount={totals.red}
           pendingApprovals={0}
+          daysSinceLastCount={null}
+          recommendationsCount={0}
+          todayWasteCount={0}
           navigate={navigate}
         />
         <RecommendationsPanel recommendations={[]} />
@@ -721,7 +864,6 @@ function SingleDashboard() {
   const [topReorder, setTopReorder] = useState<any[]>([]);
   const [highUsage, setHighUsage] = useState<ComputedUsageItem[]>([]);
   const [recommendations, setRecommendations] = useState<PARRecommendation[]>([]);
-  const [recentOrders, setRecentOrders] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [timeFilter, setTimeFilter] = useState("this_week");
   const [inventoryValue, setInventoryValue] = useState(0);
@@ -729,6 +871,12 @@ function SingleDashboard() {
   const [trendData, setTrendData] = useState<{ label: string; value: number }[]>([]);
   const [pendingInvoices, setPendingInvoices] = useState(0);
   const [wasteExposure, setWasteExposure] = useState(0);
+  const [lastSessionDate, setLastSessionDate] = useState<Date | null>(null);
+  const [lastSessionName, setLastSessionName] = useState<string | null>(null);
+  const [todayWasteEntries, setTodayWasteEntries] = useState<any[]>([]);
+  const [todayWasteCount, setTodayWasteCount] = useState(0);
+
+  const daysSinceLastCount = lastSessionDate ? differenceInDays(new Date(), lastSessionDate) : null;
 
   useEffect(() => {
     if (!currentRestaurant) return;
@@ -748,7 +896,7 @@ function SingleDashboard() {
       // --- Latest approved session + items ---
       let sessionQuery = supabase
         .from("inventory_sessions")
-        .select("id")
+        .select("id, approved_at, name")
         .eq("restaurant_id", rid)
         .eq("status", "APPROVED")
         .order("approved_at", { ascending: false })
@@ -761,6 +909,13 @@ function SingleDashboard() {
       const { data: sessions } = await sessionQuery;
 
       if (sessions && sessions.length > 0) {
+        if (sessions[0].approved_at) {
+          setLastSessionDate(new Date(sessions[0].approved_at));
+        }
+        if (sessions[0].name) {
+          setLastSessionName(sessions[0].name);
+        }
+
         const { data: items } = await supabase
           .from("inventory_session_items")
           .select("*")
@@ -776,7 +931,6 @@ function SingleDashboard() {
             if (risk.level === "RED") r++;
             else if (risk.level === "YELLOW") y++;
             else if (risk.level === "GREEN") g++;
-            // Waste exposure: (stock - PAR) * unit_cost when stock > PAR
             if (par > 0 && stock > par && i.unit_cost) {
               waste += (stock - par) * Number(i.unit_cost);
             }
@@ -786,7 +940,6 @@ function SingleDashboard() {
           setWasteExposure(waste);
           setTopReorder(reorderList.sort((a, b) => b.suggestedOrder - a.suggestedOrder).slice(0, 8));
 
-          // Compute inventory value from latest session items
           const invVal = items.reduce((sum, i) => sum + Number(i.current_stock ?? 0) * (i.unit_cost || 0), 0);
           setInventoryValue(invVal);
           setMissingCostCount(items.filter(i => !i.unit_cost).length);
@@ -797,6 +950,8 @@ function SingleDashboard() {
         setInventoryValue(0);
         setMissingCostCount(0);
         setWasteExposure(0);
+        setLastSessionDate(null);
+        setLastSessionName(null);
       }
 
       // --- Inventory Value Trend: last 8 approved sessions ---
@@ -827,7 +982,6 @@ function SingleDashboard() {
             value: val,
           });
         }
-        // Reverse to chronological order
         setTrendData(trendResults.reverse());
       } else {
         setTrendData([]);
@@ -841,11 +995,24 @@ function SingleDashboard() {
       const recs = await computePARRecommendations(rid, locId);
       setRecommendations(recs);
 
-      // --- Recent Orders ---
-      let ordersQuery = supabase.from("orders").select("*").eq("restaurant_id", rid).order("created_at", { ascending: false }).limit(8);
-      if (locId) ordersQuery = ordersQuery.eq("location_id", locId);
-      const { data: orders } = await ordersQuery;
-      if (orders) setRecentOrders(orders);
+      // --- Today's waste entries ---
+      try {
+        const todayStart = startOfDay(new Date());
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: wasteToday } = await (supabase as any)
+          .from("waste_log")
+          .select("item_name, quantity, reason, logged_at")
+          .eq("restaurant_id", rid)
+          .gte("logged_at", todayStart.toISOString())
+          .order("logged_at", { ascending: false })
+          .limit(20);
+        setTodayWasteEntries((wasteToday as any[]) || []);
+        setTodayWasteCount(((wasteToday as any[]) || []).length);
+      } catch {
+        setTodayWasteEntries([]);
+        setTodayWasteCount(0);
+      }
+
       setLoading(false);
     };
     fetchData();
@@ -854,15 +1021,13 @@ function SingleDashboard() {
   if (loading) {
     return (
       <div className="space-y-5 animate-fade-in">
-        <Skeleton className="h-14 rounded-xl" />
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-28 rounded-xl" />)}</div>
+        <Skeleton className="h-16 rounded-xl" />
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">{[1, 2, 3, 4, 5].map(i => <Skeleton key={i} className="h-28 rounded-xl" />)}</div>
         <div className="grid gap-5 lg:grid-cols-2">{[1, 2].map(i => <Skeleton key={i} className="h-64 rounded-xl" />)}</div>
       </div>
     );
   }
 
-
-  // Estimate reorder value
   const reorderValue = topReorder.reduce((sum, item) => {
     const cost = item.unit_cost || 0;
     return sum + Math.round(item.suggestedOrder * 100) / 100 * cost;
@@ -872,10 +1037,14 @@ function SingleDashboard() {
     ? `${missingCostCount} item${missingCostCount !== 1 ? "s" : ""} missing costs`
     : "From latest approved session";
 
+  const lastCountAccent: "success" | "warning" | "destructive" =
+    daysSinceLastCount === null ? "destructive"
+    : daysSinceLastCount <= 2 ? "success"
+    : daysSinceLastCount <= 5 ? "warning"
+    : "destructive";
+
   return (
     <div className="space-y-6 animate-fade-in">
-      <ParAlertsBanner />
-
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold tracking-tight font-display">Dashboard</h1>
@@ -886,14 +1055,18 @@ function SingleDashboard() {
         </div>
       </div>
 
-      <CommandBar
+      {/* Today's Briefing */}
+      <TodaysBriefing
         timeFilter={timeFilter}
         setTimeFilter={setTimeFilter}
         onStartInventory={() => navigate("/app/inventory/enter")}
+        stockStatus={stockStatus}
+        pendingInvoices={pendingInvoices}
+        daysSinceLastCount={daysSinceLastCount}
       />
 
-      {/* Executive KPI Cards */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {/* Executive KPI Cards — 5 cards */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <KpiCard
           icon={DollarSign}
           label="Inventory Value ($)"
@@ -922,6 +1095,19 @@ function SingleDashboard() {
           accent="success"
           changeLabel="Suggested reorder value"
         />
+        <KpiCard
+          icon={CalendarDays}
+          label="Last Count"
+          value={
+            daysSinceLastCount === null
+              ? "Never"
+              : daysSinceLastCount === 0
+              ? "Today"
+              : `${daysSinceLastCount}d ago`
+          }
+          accent={lastCountAccent}
+          changeLabel={lastSessionName ?? "No counts yet"}
+        />
       </div>
 
       {/* Action Center + Smart Order */}
@@ -929,10 +1115,24 @@ function SingleDashboard() {
         <ActionCenter
           criticalCount={stockStatus.red}
           pendingApprovals={pendingInvoices}
+          daysSinceLastCount={daysSinceLastCount}
+          recommendationsCount={recommendations.length}
+          todayWasteCount={todayWasteCount}
           navigate={navigate}
         />
-        <SmartOrderPreview topReorder={topReorder} navigate={navigate} />
+        <SmartOrderPreview
+          topReorder={topReorder}
+          redCount={stockStatus.red}
+          yellowCount={stockStatus.yellow}
+          reorderValue={reorderValue}
+          navigate={navigate}
+        />
       </div>
+
+      {/* Today's Waste Snapshot */}
+      {currentRestaurant && (
+        <WasteSnapshot entries={todayWasteEntries} navigate={navigate} />
+      )}
 
       {/* Spend Overview */}
       {currentRestaurant && (
