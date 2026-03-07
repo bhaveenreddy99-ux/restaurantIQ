@@ -123,6 +123,14 @@ export default function InvoiceReviewPage() {
 
       if ((!comps || comps.length === 0) && items && items.length > 0) {
         await generateComparisons(inv, items, poItemsList, mappings, cats || []);
+        // Fire-and-forget: notify owners/managers of delivery issues.
+        // Runs after comparisons are committed so the SQL function sees them.
+        // Non-blocking — the page renders without waiting for this.
+        supabase
+          .rpc('notify_delivery_issues', { p_purchase_history_id: id })
+          .then(({ error }) => {
+            if (error) console.warn('[notify_delivery_issues]', error.message);
+          });
       }
     } finally {
       setLoading(false);

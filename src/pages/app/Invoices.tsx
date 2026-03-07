@@ -25,6 +25,7 @@ import { useInvoiceMatching } from "@/components/invoices/useInvoiceMatching";
 import InvoiceItemsTable from "@/components/invoices/InvoiceItemsTable";
 import VendorConnectTab from "@/components/invoices/VendorConnectTab";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 
 const STATUS_CONFIG: Record<InvoiceStatus, { label: string; color: string; bgColor: string }> = {
   DRAFT: { label: "Draft", color: "text-warning", bgColor: "bg-warning/10 border-warning/20" },
@@ -44,6 +45,11 @@ export default function InvoicesPage() {
   const [searchFilter, setSearchFilter] = useState("");
   const [dateRange, setDateRange] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [deliveryIssuePOs, setDeliveryIssuePOs] = useState<Array<{
+    purchase_history_id: string;
+    po_number: string | null;
+    issue_count: number;
+  }>>([]);
 
   // Create invoice state
   const [createTab, setCreateTab] = useState("manual");
@@ -88,6 +94,15 @@ export default function InvoicesPage() {
   }, [currentRestaurant, dateRange]);
 
   useEffect(() => { fetchPurchases(); }, [fetchPurchases]);
+
+  useEffect(() => {
+    if (!currentRestaurant) return;
+    supabase
+      .rpc('get_delivery_issue_pos', { p_restaurant_id: currentRestaurant.id })
+      .then(({ data, error }) => {
+        if (!error && data) setDeliveryIssuePOs(data);
+      });
+  }, [currentRestaurant]);
 
   useEffect(() => {
     if (!currentRestaurant) return;
@@ -666,6 +681,29 @@ export default function InvoicesPage() {
             </p>
           </CardContent>
         </Card>
+      )}
+
+      {/* Delivery Issues Banner */}
+      {deliveryIssuePOs.length > 0 && (
+        <Alert className="border-destructive/30 bg-destructive/5">
+          <AlertTriangle className="h-4 w-4 text-destructive" />
+          <AlertDescription className="text-sm flex flex-col gap-1">
+            <span className="font-semibold text-destructive">
+              {deliveryIssuePOs.length} purchase order{deliveryIssuePOs.length > 1 ? 's' : ''} have unresolved delivery issues
+            </span>
+            <div className="flex flex-wrap gap-2 mt-1">
+              {deliveryIssuePOs.map((po) => (
+                <button
+                  key={po.purchase_history_id}
+                  onClick={() => navigate(`/app/invoices/${po.purchase_history_id}/review`)}
+                  className="text-destructive underline underline-offset-2 hover:opacity-70 text-xs font-mono"
+                >
+                  {po.po_number ?? 'PO'} ({po.issue_count} issue{po.issue_count !== 1 ? 's' : ''}) →
+                </button>
+              ))}
+            </div>
+          </AlertDescription>
+        </Alert>
       )}
 
       {/* Invoice List */}

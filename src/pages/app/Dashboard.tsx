@@ -132,6 +132,7 @@ function ActionCenter({
   daysSinceLastCount,
   recommendationsCount,
   todayWasteCount,
+  deliveryIssueCount,
   navigate,
 }: {
   criticalCount: number;
@@ -139,6 +140,7 @@ function ActionCenter({
   daysSinceLastCount: number | null;
   recommendationsCount: number;
   todayWasteCount: number;
+  deliveryIssueCount: number;
   navigate: (path: string) => void;
 }) {
   const items = [
@@ -181,6 +183,14 @@ function ActionCenter({
       bg: "bg-muted/30",
       path: "/app/waste-log",
       show: daysSinceLastCount !== null && daysSinceLastCount <= 1 && todayWasteCount === 0,
+    },
+    {
+      icon: AlertTriangle,
+      label: `${deliveryIssueCount} order${deliveryIssueCount !== 1 ? 's' : ''} with delivery issues`,
+      color: "text-destructive",
+      bg: "bg-destructive/6",
+      path: "/app/invoices",
+      show: deliveryIssueCount > 0,
     },
   ].filter((i) => i.show);
 
@@ -845,6 +855,7 @@ function PortfolioDashboard({ setCurrentRestaurant }: { setCurrentRestaurant: (r
           daysSinceLastCount={null}
           recommendationsCount={0}
           todayWasteCount={0}
+          deliveryIssueCount={0}
           navigate={navigate}
         />
         <RecommendationsPanel recommendations={[]} />
@@ -875,6 +886,7 @@ function SingleDashboard() {
   const [lastSessionName, setLastSessionName] = useState<string | null>(null);
   const [todayWasteEntries, setTodayWasteEntries] = useState<any[]>([]);
   const [todayWasteCount, setTodayWasteCount] = useState(0);
+  const [deliveryIssueCount, setDeliveryIssueCount] = useState(0);
 
   const daysSinceLastCount = lastSessionDate ? differenceInDays(new Date(), lastSessionDate) : null;
 
@@ -884,6 +896,13 @@ function SingleDashboard() {
       .eq("restaurant_id", currentRestaurant.id)
       .in("invoice_status", ["DRAFT", "RECEIVED"])
       .then(({ count }) => { setPendingInvoices(count || 0); });
+  }, [currentRestaurant]);
+
+  useEffect(() => {
+    if (!currentRestaurant) return;
+    supabase
+      .rpc('get_delivery_issue_pos', { p_restaurant_id: currentRestaurant.id })
+      .then(({ data }) => { if (data) setDeliveryIssueCount(data.length); });
   }, [currentRestaurant]);
 
   useEffect(() => {
@@ -1118,6 +1137,7 @@ function SingleDashboard() {
           daysSinceLastCount={daysSinceLastCount}
           recommendationsCount={recommendations.length}
           todayWasteCount={todayWasteCount}
+          deliveryIssueCount={deliveryIssueCount}
           navigate={navigate}
         />
         <SmartOrderPreview

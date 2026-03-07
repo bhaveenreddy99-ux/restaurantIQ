@@ -2153,6 +2153,14 @@ export type Database = {
         Args: { p_invoice_id: string; p_restaurant_id: string }
         Returns: Json
       }
+      get_delivery_issue_pos: {
+        Args: { p_restaurant_id: string }
+        Returns: Array<{ purchase_history_id: string; po_number: string | null; issue_count: number }>
+      }
+      notify_delivery_issues: {
+        Args: { p_purchase_history_id: string }
+        Returns: Json
+      }
       generate_po_number: {
         Args: { p_restaurant_id: string }
         Returns: string

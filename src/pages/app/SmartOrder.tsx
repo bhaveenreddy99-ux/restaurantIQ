@@ -140,16 +140,48 @@ export default function SmartOrderPage() {
 
   const handleSubmitOrder = async () => {
     if (!selectedRun || !user) return;
+    // Capture pre-submit status from the closure so the toast is correct
+    // even after state updates happen asynchronously.
+    const isFirstSubmit = selectedRun.status !== 'submitted';
     setSubmitting(true);
     try {
       // PO number generation and assignment is handled entirely by the RPC.
       const { data: rpcResult, error } = await supabase.rpc('submit_smart_order', { p_run_id: selectedRun.id });
       if (error) throw error;
 
-      const poNumber = rpcResult?.po_number ?? selectedRun.po_number;
-      setSelectedRun((prev: any) => ({ ...prev, status: 'submitted', po_number: poNumber }));
-      setRuns(prev => prev.map(r => r.id === selectedRun.id ? { ...r, status: 'submitted', po_number: poNumber } : r));
-      toast.success(selectedRun.status === 'submitted' ? 'Purchase History updated' : `Order submitted — ${poNumber}`);
+      // Re-fetch the updated row so we always have the DB-authoritative
+      // po_number and status, regardless of what the RPC return value looks
+      // like under different PostgREST schema-cache states.
+      const { data: freshRun } = await supabase
+        .from('smart_order_runs')
+        .select('id, status, po_number')
+        .eq('id', selectedRun.id)
+        .single();
+
+      // Primary: re-fetched row. Fallback: RPC JSONB payload. Never null.
+      const poNumber: string | null =
+        freshRun?.po_number ??
+        (rpcResult as any)?.po_number ??
+        null;
+
+      setSelectedRun((prev: any) => ({
+        ...prev,
+        status: freshRun?.status ?? 'submitted',
+        po_number: poNumber,
+      }));
+      setRuns(prev =>
+        prev.map(r =>
+          r.id === selectedRun.id
+            ? { ...r, status: freshRun?.status ?? 'submitted', po_number: poNumber }
+            : r
+        )
+      );
+
+      if (isFirstSubmit) {
+        toast.success(poNumber ? `Order submitted — ${poNumber}` : 'Order submitted');
+      } else {
+        toast.success('Purchase History updated');
+      }
     } catch (e: any) {
       toast.error(`Submit failed: ${e.message}`);
     } finally {
