@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useRestaurant } from "@/contexts/RestaurantContext";
@@ -13,10 +13,22 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import {
-  ArrowLeft, CheckCircle, AlertTriangle, Package, DollarSign,
+  ArrowLeft, BookmarkPlus, CheckCircle, AlertTriangle, Package, DollarSign,
   Loader2, Flag, TrendingUp, ExternalLink,
 } from "lucide-react";
 import { formatNum } from "@/lib/inventory-utils";
+
+// Returns the catalog_item_id for a purchase_history_item by checking:
+// 1. Already set on the item, 2. SKU match in vendor mappings, 3. Name match in vendor mappings
+function resolveItemMapping(phItem: any, mappings: any[]): string | null {
+  if (phItem.catalog_item_id) return phItem.catalog_item_id;
+  if (phItem.vendor_sku) {
+    const m = mappings.find(m => m.vendor_sku?.toLowerCase() === phItem.vendor_sku?.toLowerCase());
+    if (m) return m.catalog_item_id;
+  }
+  const m = mappings.find(m => m.vendor_item_name?.toLowerCase() === phItem.item_name?.toLowerCase().trim());
+  return m?.catalog_item_id ?? null;
+}
 
 const ISSUE_TYPES = [
   { value: "short_shipped", label: "Short Shipped" },
@@ -36,8 +48,22 @@ export default function InvoiceReviewPage() {
   const [poItems, setPoItems] = useState<any[]>([]);
   const [comparisons, setComparisons] = useState<any[]>([]);
   const [issues, setIssues] = useState<any[]>([]);
+  const [catalogItems, setCatalogItems] = useState<any[]>([]);
+  const [vendorMappings, setVendorMappings] = useState<any[]>([]);
+  const [catalogOverrides, setCatalogOverrides] = useState<Record<string, string>>({});
+  const [savingMappings, setSavingMappings] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [confirming, setConfirming] = useState(false);
+
+  const catalogById = useMemo(
+    () => Object.fromEntries(catalogItems.map(c => [c.id, c])),
+    [catalogItems],
+  );
+
+  const phItemById = useMemo(
+    () => Object.fromEntries(invoiceItems.map(i => [i.id, i])),
+    [invoiceItems],
+  );
 
   // Confirmation result dialog
   const [confirmResult, setConfirmResult] = useState<any>(null);
@@ -65,36 +91,45 @@ export default function InvoiceReviewPage() {
       if (!inv) { toast.error("Invoice not found"); navigate(-1); return; }
       setInvoice(inv);
 
-      const { data: items } = await supabase
-        .from("purchase_history_items")
-        .select("*")
-        .eq("purchase_history_id", id);
-      setInvoiceItems(items || []);
+      const [
+        { data: items },
+        { data: cats },
+        { data: comps },
+        { data: issuesList },
+      ] = await Promise.all([
+        supabase.from("purchase_history_items").select("*").eq("purchase_history_id", id),
+        supabase.from("inventory_catalog_items").select("id, item_name, vendor_sku, product_number").eq("restaurant_id", currentRestaurant!.id),
+        supabase.from("invoice_line_comparisons").select("*").eq("purchase_history_id", id),
+        supabase.from("delivery_issues").select("*").eq("purchase_history_id", id),
+      ]);
 
       const poItemsList = inv.smart_order_runs?.smart_order_run_items || [];
       setPoItems(poItemsList);
-
-      const { data: comps } = await supabase
-        .from("invoice_line_comparisons")
-        .select("*")
-        .eq("purchase_history_id", id);
-      setComparisons(comps || []);
-
-      const { data: issuesList } = await supabase
-        .from("delivery_issues")
-        .select("*")
-        .eq("purchase_history_id", id);
+      setInvoiceItems(items || []);
+      setCatalogItems(cats || []);
       setIssues(issuesList || []);
 
+      let mappings: any[] = [];
+      if (inv.vendor_name) {
+        const { data: mappingsData } = await supabase
+          .from("vendor_item_mappings")
+          .select("*")
+          .eq("restaurant_id", currentRestaurant!.id)
+          .eq("vendor_name", inv.vendor_name);
+        mappings = mappingsData || [];
+      }
+      setVendorMappings(mappings);
+      setComparisons(comps || []);
+
       if ((!comps || comps.length === 0) && items && items.length > 0) {
-        await generateComparisons(inv, items, poItemsList);
+        await generateComparisons(inv, items, poItemsList, mappings);
       }
     } finally {
       setLoading(false);
     }
   };
 
-  const generateComparisons = async (inv: any, items: any[], poItemsList: any[]) => {
+  const generateComparisons = async (inv: any, items: any[], poItemsList: any[], mappings: any[]) => {
     const poMap: Record<string, any> = {};
     poItemsList.forEach((poi: any) => {
       poMap[poi.item_name?.toLowerCase().trim()] = poi;
@@ -120,7 +155,7 @@ export default function InvoiceReviewPage() {
         purchase_history_id: inv.id,
         purchase_history_item_id: item.id,
         smart_order_run_id: inv.smart_order_run_id,
-        catalog_item_id: item.catalog_item_id || null,
+        catalog_item_id: resolveItemMapping(item, mappings),
         item_name: item.item_name,
         po_qty: poQty,
         po_unit_cost: poCost,

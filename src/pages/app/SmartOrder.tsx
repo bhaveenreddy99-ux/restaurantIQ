@@ -142,20 +142,11 @@ export default function SmartOrderPage() {
     if (!selectedRun || !user) return;
     setSubmitting(true);
     try {
-      // Generate PO number if not already submitted
-      let poNumber = selectedRun.po_number;
-      if (!poNumber) {
-        poNumber = `PO-${Date.now().toString().slice(-6)}`;
-        const { error: poErr } = await supabase
-          .from("smart_order_runs")
-          .update({ po_number: poNumber })
-          .eq("id", selectedRun.id);
-        if (poErr) throw poErr;
-      }
-
-      const { error } = await supabase.rpc('submit_smart_order', { p_run_id: selectedRun.id });
+      // PO number generation and assignment is handled entirely by the RPC.
+      const { data: rpcResult, error } = await supabase.rpc('submit_smart_order', { p_run_id: selectedRun.id });
       if (error) throw error;
 
+      const poNumber = rpcResult?.po_number ?? selectedRun.po_number;
       setSelectedRun((prev: any) => ({ ...prev, status: 'submitted', po_number: poNumber }));
       setRuns(prev => prev.map(r => r.id === selectedRun.id ? { ...r, status: 'submitted', po_number: poNumber } : r));
       toast.success(selectedRun.status === 'submitted' ? 'Purchase History updated' : `Order submitted — ${poNumber}`);
