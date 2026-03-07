@@ -122,24 +122,68 @@ export default function InvoiceReviewPage() {
       setComparisons(comps || []);
 
       if ((!comps || comps.length === 0) && items && items.length > 0) {
-        await generateComparisons(inv, items, poItemsList, mappings);
+        await generateComparisons(inv, items, poItemsList, mappings, cats || []);
       }
     } finally {
       setLoading(false);
     }
   };
 
-  const generateComparisons = async (inv: any, items: any[], poItemsList: any[], mappings: any[]) => {
-    const poMap: Record<string, any> = {};
-    poItemsList.forEach((poi: any) => {
-      poMap[poi.item_name?.toLowerCase().trim()] = poi;
+  const generateComparisons = async (
+    inv: any,
+    items: any[],
+    poItemsList: any[],
+    mappings: any[],
+    catalogItemsList: any[],
+  ) => {
+    // Build catalog lookup by lowercase name for resolving PO items
+    const catalogByName: Record<string, any> = {};
+    catalogItemsList.forEach(c => {
+      catalogByName[c.item_name?.toLowerCase().trim()] = c;
     });
 
+    // Resolve each PO item to a catalog_item_id (direct field first, then name fallback)
+    const resolvedPoItems = poItemsList.map((poi: any) => ({
+      ...poi,
+      resolved_catalog_id:
+        poi.catalog_item_id ||
+        catalogByName[poi.item_name?.toLowerCase().trim()]?.id ||
+        null,
+    }));
+
+    // Map catalog_item_id → PO item for fast lookup
+    const poByCatalogId: Record<string, any> = {};
+    resolvedPoItems.forEach((poi: any) => {
+      if (poi.resolved_catalog_id) poByCatalogId[poi.resolved_catalog_id] = poi;
+    });
+
+    // Track which PO catalog IDs were claimed by an invoice line
+    const matchedPoCatalogIds = new Set<string>();
+
     const rows = items.map(item => {
-      const key = item.item_name?.toLowerCase().trim();
-      const po = poMap[key];
+      const catalogId = resolveItemMapping(item, mappings);
       const invoicedQty = Number(item.quantity) || 0;
       const invoicedCost = Number(item.unit_cost) || 0;
+
+      // Cannot resolve to catalog → needs manual mapping, not extra_on_invoice
+      if (!catalogId) {
+        return {
+          purchase_history_id: inv.id,
+          purchase_history_item_id: item.id,
+          smart_order_run_id: inv.smart_order_run_id,
+          catalog_item_id: null,
+          item_name: item.item_name,
+          po_qty: null,
+          po_unit_cost: null,
+          invoiced_qty: invoicedQty,
+          invoiced_unit_cost: invoicedCost,
+          status: "unmatched",
+        };
+      }
+
+      const po = poByCatalogId[catalogId];
+      if (po) matchedPoCatalogIds.add(catalogId);
+
       const poQty = po ? Number(po.suggested_order) || 0 : null;
       const poCost = po ? Number(po.unit_cost) || 0 : null;
 
@@ -155,7 +199,7 @@ export default function InvoiceReviewPage() {
         purchase_history_id: inv.id,
         purchase_history_item_id: item.id,
         smart_order_run_id: inv.smart_order_run_id,
-        catalog_item_id: resolveItemMapping(item, mappings),
+        catalog_item_id: catalogId,
         item_name: item.item_name,
         po_qty: poQty,
         po_unit_cost: poCost,
@@ -165,23 +209,23 @@ export default function InvoiceReviewPage() {
       };
     });
 
-    const invoiceNames = new Set(items.map(i => i.item_name?.toLowerCase().trim()));
-    poItemsList.forEach((poi: any) => {
-      const key = poi.item_name?.toLowerCase().trim();
-      if (!invoiceNames.has(key) && Number(poi.suggested_order) > 0) {
-        rows.push({
-          purchase_history_id: inv.id,
-          purchase_history_item_id: null,
-          smart_order_run_id: inv.smart_order_run_id,
-          catalog_item_id: null,
-          item_name: poi.item_name,
-          po_qty: Number(poi.suggested_order),
-          po_unit_cost: Number(poi.unit_cost) || null,
-          invoiced_qty: 0,
-          invoiced_unit_cost: 0,
-          status: "missing_from_invoice",
-        });
-      }
+    // PO items not matched by any invoice line → missing_from_invoice
+    resolvedPoItems.forEach((poi: any) => {
+      if (Number(poi.suggested_order) <= 0) return;
+      const catalogId = poi.resolved_catalog_id;
+      if (catalogId && matchedPoCatalogIds.has(catalogId)) return;
+      rows.push({
+        purchase_history_id: inv.id,
+        purchase_history_item_id: null,
+        smart_order_run_id: inv.smart_order_run_id,
+        catalog_item_id: catalogId || null,
+        item_name: poi.item_name,
+        po_qty: Number(poi.suggested_order),
+        po_unit_cost: Number(poi.unit_cost) || null,
+        invoiced_qty: 0,
+        invoiced_unit_cost: 0,
+        status: "missing_from_invoice",
+      });
     });
 
     if (rows.length > 0) {
@@ -258,6 +302,62 @@ export default function InvoiceReviewPage() {
     }
   };
 
+  const handleSaveMapping = async (comp: any) => {
+    const selectedCatalogId = catalogOverrides[comp.id];
+    if (!selectedCatalogId || !currentRestaurant || !invoice) return;
+    setSavingMappings(prev => ({ ...prev, [comp.id]: true }));
+    try {
+      const phItem = comp.purchase_history_item_id ? phItemById[comp.purchase_history_item_id] : null;
+
+      await supabase.from("vendor_item_mappings").upsert(
+        {
+          restaurant_id: currentRestaurant.id,
+          vendor_name: invoice.vendor_name,
+          vendor_sku: phItem?.vendor_sku || null,
+          vendor_item_name: comp.item_name,
+          catalog_item_id: selectedCatalogId,
+        },
+        { onConflict: "restaurant_id,vendor_name,vendor_item_name" },
+      );
+
+      if (comp.purchase_history_item_id) {
+        await supabase
+          .from("purchase_history_items")
+          .update({ catalog_item_id: selectedCatalogId, match_status: "MAPPED" })
+          .eq("id", comp.purchase_history_item_id);
+      }
+
+      await supabase
+        .from("invoice_line_comparisons")
+        .update({ catalog_item_id: selectedCatalogId })
+        .eq("id", comp.id);
+
+      setComparisons(prev =>
+        prev.map(c => c.id === comp.id ? { ...c, catalog_item_id: selectedCatalogId } : c),
+      );
+      setVendorMappings(prev => {
+        const idx = prev.findIndex(
+          m => m.vendor_item_name?.toLowerCase() === comp.item_name?.toLowerCase(),
+        );
+        const entry = {
+          restaurant_id: currentRestaurant.id,
+          vendor_name: invoice.vendor_name,
+          vendor_item_name: comp.item_name,
+          vendor_sku: phItem?.vendor_sku || null,
+          catalog_item_id: selectedCatalogId,
+        };
+        if (idx >= 0) { const next = [...prev]; next[idx] = entry; return next; }
+        return [...prev, entry];
+      });
+      setCatalogOverrides(prev => { const next = { ...prev }; delete next[comp.id]; return next; });
+      toast.success("Mapping saved");
+    } catch (e: any) {
+      toast.error(`Failed: ${e.message}`);
+    } finally {
+      setSavingMappings(prev => ({ ...prev, [comp.id]: false }));
+    }
+  };
+
   const statusBadge = (status: string) => {
     switch (status) {
       case "ok": return <Badge className="bg-success/10 text-success border-0 text-[10px]">OK</Badge>;
@@ -265,6 +365,7 @@ export default function InvoiceReviewPage() {
       case "price_mismatch": return <Badge className="bg-orange-500/10 text-orange-600 border-0 text-[10px]">Price Mismatch</Badge>;
       case "missing_from_invoice": return <Badge className="bg-destructive/10 text-destructive border-0 text-[10px]">Missing</Badge>;
       case "extra_on_invoice": return <Badge className="bg-blue-500/10 text-blue-600 border-0 text-[10px]">Extra</Badge>;
+      case "unmatched": return <Badge className="bg-muted/60 text-muted-foreground border-0 text-[10px]">Unmatched</Badge>;
       default: return null;
     }
   };
@@ -400,7 +501,83 @@ export default function InvoiceReviewPage() {
                     ? comp.invoiced_unit_cost - comp.po_unit_cost : null;
                   return (
                     <TableRow key={comp.id} className={comp.status !== "ok" ? "bg-warning/3" : ""}>
-                      <TableCell className="text-sm font-medium">{comp.item_name}</TableCell>
+                      <TableCell className="text-sm font-medium">
+                        <div>
+                          <span>{comp.item_name}</span>
+                          {/* Catalog matching — only for rows that have a purchase_history_item */}
+                          {comp.purchase_history_item_id != null && (() => {
+                            const override = catalogOverrides[comp.id];
+                            if (override !== undefined) {
+                              // User is actively selecting a catalog item
+                              return (
+                                <div className="flex items-center gap-1 mt-1">
+                                  <Select
+                                    value={override}
+                                    onValueChange={val => setCatalogOverrides(prev => ({ ...prev, [comp.id]: val }))}
+                                  >
+                                    <SelectTrigger className="h-6 text-[11px] w-44 border-dashed">
+                                      <SelectValue placeholder="Match catalog…" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {catalogItems.map(c => (
+                                        <SelectItem key={c.id} value={c.id} className="text-xs">{c.item_name}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                  {override && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 px-1.5 text-primary"
+                                      disabled={savingMappings[comp.id]}
+                                      onClick={() => handleSaveMapping(comp)}
+                                    >
+                                      {savingMappings[comp.id]
+                                        ? <Loader2 className="h-3 w-3 animate-spin" />
+                                        : <BookmarkPlus className="h-3 w-3" />}
+                                    </Button>
+                                  )}
+                                </div>
+                              );
+                            }
+                            if (comp.catalog_item_id) {
+                              // Auto-matched — show name badge with a change link
+                              const catalogItem = catalogById[comp.catalog_item_id];
+                              return (
+                                <div className="flex items-center gap-1.5 mt-1">
+                                  <Badge className="bg-primary/10 text-primary border-0 text-[10px] font-normal">
+                                    {catalogItem?.item_name ?? comp.catalog_item_id}
+                                  </Badge>
+                                  <button
+                                    className="text-[10px] text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+                                    onClick={() => setCatalogOverrides(prev => ({ ...prev, [comp.id]: comp.catalog_item_id }))}
+                                  >
+                                    change
+                                  </button>
+                                </div>
+                              );
+                            }
+                            // No match yet — show empty picker
+                            return (
+                              <div className="mt-1">
+                                <Select
+                                  value=""
+                                  onValueChange={val => setCatalogOverrides(prev => ({ ...prev, [comp.id]: val }))}
+                                >
+                                  <SelectTrigger className="h-6 text-[11px] w-44 border-dashed text-muted-foreground">
+                                    <SelectValue placeholder="Match catalog…" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {catalogItems.map(c => (
+                                      <SelectItem key={c.id} value={c.id} className="text-xs">{c.item_name}</SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </TableCell>
                       <TableCell className="text-sm text-right font-mono text-muted-foreground">
                         {comp.po_qty != null ? formatNum(comp.po_qty) : "—"}
                       </TableCell>
